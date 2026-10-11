@@ -188,10 +188,46 @@ EOF
 esac
 CTL_EOF
 
-# Create systemctl compatibility
+# Create systemctl compatibility (FIXED to handle unit names properly)
 RUN cat > /usr/local/bin/systemctl << 'SYSCTL_EOF'
 #!/bin/bash
-exec /usr/local/bin/ivtctl "$@"
+set -u
+RUN=/run/ivt; UNITS=/etc/ivt/units; TARGETS=/etc/ivt/targets; LOG=/var/log/ivt/journal; IVTCTL=/usr/local/bin/ivtctl
+
+status_pretty() {
+  printf '%-20s %-10s %-8s %-8s\n' "UNIT" "STATE" "PID" "ENABLED"
+  for unit in $UNITS/*.service; do
+    [[ -e $unit ]] || continue
+    name=$(basename $unit .service)
+    state=$(cat $RUN/state/$name 2>/dev/null || echo inactive)
+    pid=$(cat $RUN/pids/$name.pid 2>/dev/null || echo -)
+    enabled=no; [[ -e $TARGETS/default.wants/$name.service ]] && enabled=yes
+    printf '%-20s %-10s %-8s %-8s\n' "$name" "$state" "$pid" "$enabled"
+  done
+}
+
+cmd=$1; shift || true
+case $cmd in
+  start|stop|restart) $IVTCTL "$cmd" "${1%.service}" ;;
+  status) 
+    if [[ -n "${1:-}" ]]; then
+      unit="${1%.service}"
+      state=$(cat $RUN/state/$unit 2>/dev/null || echo inactive)
+      pid=$(cat $RUN/pids/$unit.pid 2>/dev/null || echo -)
+      echo "● $unit.service"
+      echo "   Active: $state (Main PID: $pid)"
+      if [[ -f $LOG/$unit.log ]]; then
+        echo "   Logs (last 10 lines):"
+        tail -n 10 $LOG/$unit.log | sed 's/^/     /'
+      fi
+    else
+      status_pretty
+    fi 
+    ;;
+  enable) mkdir -p $TARGETS/default.wants; ln -sf $UNITS/${1%.service}.service $TARGETS/default.wants/ ; echo "Created symlink" ;;
+  disable) rm -f $TARGETS/default.wants/${1%.service}.service ; echo "Removed symlink" ;;
+  *) $IVTCTL "$cmd" "$@" ;;
+esac
 SYSCTL_EOF
 
 # Create journalctl compatibility
