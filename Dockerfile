@@ -23,7 +23,7 @@ RUN printf 'PRETTY_NAME="Ubuntu 24.04.1 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\
 RUN mkdir -p \
       /ivt/os /etc/ivt/units /etc/ivt/targets/default.wants \
       /run/ivt/ctrl /run/ivt/pids /run/ivt/state /run/ivt/manual /run/ivt/link \
-      /var/log/ivt/journal /etc/systemd /lib/systemd /run/systemd
+      /var/log/ivt/journal /etc/systemd/system /lib/systemd/system /run/systemd
 
 # Create IVT-D init system (PID 1) - NOW SUPPORTS WorkingDirectory
 RUN cat > /ivt/os/init << 'INITEOF'
@@ -202,30 +202,58 @@ EOF
 esac
 CTL_EOF
 
-# Create systemctl compatibility
+# Create UNIVERSAL systemctl compatibility (Bridges /etc/systemd/system/ to IVT-D)
 RUN cat > /usr/local/bin/systemctl << 'SYSCTL_EOF'
 #!/bin/bash
 set -u
-RUN=/run/ivt; UNITS=/etc/ivt/units; TARGETS=/etc/ivt/targets; LOG=/var/log/ivt/journal; IVTCTL=/usr/local/bin/ivtctl
+RUN=/run/ivt
+UNITS=/etc/ivt/units
+TARGETS=/etc/ivt/targets
+LOG=/var/log/ivt/journal
+IVTCTL=/usr/local/bin/ivtctl
 
-status_pretty() {
-  printf '%-20s %-10s %-8s %-8s\n' "UNIT" "STATE" "PID" "ENABLED"
-  for unit in $UNITS/*.service; do
-    [[ -e $unit ]] || continue
-    name=$(basename $unit .service)
-    state=$(cat $RUN/state/$name 2>/dev/null || echo inactive)
-    pid=$(cat $RUN/pids/$name.pid 2>/dev/null || echo -)
-    enabled=no; [[ -e $TARGETS/default.wants/$name.service ]] && enabled=yes
-    printf '%-20s %-10s %-8s %-8s\n' "$name" "$state" "$pid" "$enabled"
-  done
+# Automatically sync any unit file placed in /etc/systemd/system/ by standard installers
+ensure_unit() {
+  local unit="${1%.service}.service"
+  local sys_unit="/etc/systemd/system/$unit"
+  local ivt_unit="$UNITS/$unit"
+  if [[ -f "$sys_unit" && ! -f "$ivt_unit" ]]; then
+    cp "$sys_unit" "$ivt_unit"
+    chmod 644 "$ivt_unit"
+  fi
 }
 
 cmd=$1; shift || true
+
 case $cmd in
-  start|stop|restart) $IVTCTL "$cmd" "${1%.service}" ;;
-  status) 
+  daemon-reload)
+    for f in /etc/systemd/system/*.service; do
+      [[ -e "$f" ]] || continue
+      cp "$f" "$UNITS/"
+    done
+    echo "IVT-D: daemon-reload simulated (units synced)"
+    ;;
+  enable)
+    unit="${1%.service}"
+    ensure_unit "$unit"
+    mkdir -p "$TARGETS/default.wants"
+    ln -sf "$UNITS/$unit.service" "$TARGETS/default.wants/$unit.service"
+    echo "Created symlink"
+    ;;
+  disable)
+    unit="${1%.service}"
+    rm -f "$TARGETS/default.wants/$unit.service"
+    echo "Removed symlink"
+    ;;
+  start|stop|restart)
+    unit="${1%.service}"
+    ensure_unit "$unit"
+    $IVTCTL "$cmd" "$unit"
+    ;;
+  status)
     if [[ -n "${1:-}" ]]; then
       unit="${1%.service}"
+      ensure_unit "$unit"
       state=$(cat $RUN/state/$unit 2>/dev/null || echo inactive)
       pid=$(cat $RUN/pids/$unit.pid 2>/dev/null || echo -)
       echo "● $unit.service"
@@ -235,12 +263,23 @@ case $cmd in
         tail -n 10 $LOG/$unit.log | sed 's/^/     /'
       fi
     else
-      status_pretty
+      printf '%-20s %-10s %-8s %-8s\n' "UNIT" "STATE" "PID" "ENABLED"
+      declare -A seen
+      for unit_file in $UNITS/*.service /etc/systemd/system/*.service; do
+        [[ -e $unit_file ]] || continue
+        unit=$(basename $unit_file .service)
+        [[ -n "${seen[$unit]}" ]] && continue
+        seen[$unit]=1
+        state=$(cat $RUN/state/$unit 2>/dev/null || echo inactive)
+        pid=$(cat $RUN/pids/$unit.pid 2>/dev/null || echo -)
+        enabled=no; [[ -e $TARGETS/default.wants/$unit.service ]] && enabled=yes
+        printf '%-20s %-10s %-8s %-8s\n' "$unit" "$state" "$pid" "$enabled"
+      done
     fi 
     ;;
-  enable) mkdir -p $TARGETS/default.wants; ln -sf $UNITS/${1%.service}.service $TARGETS/default.wants/ ; echo "Created symlink" ;;
-  disable) rm -f $TARGETS/default.wants/${1%.service}.service ; echo "Removed symlink" ;;
-  *) $IVTCTL "$cmd" "$@" ;;
+  *)
+    $IVTCTL "$cmd" "$@"
+    ;;
 esac
 SYSCTL_EOF
 
