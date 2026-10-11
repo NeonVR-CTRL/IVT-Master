@@ -6,26 +6,21 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     IVT_ROLE=master
 
-# Prevent apt from trying to start services during installation (Standard Docker Fix)
 RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d
 
-# Install minimal dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       bash coreutils procps util-linux mawk ca-certificates curl sudo python3-minimal systemd-sysv && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* /var/cache/apt/*
 
-# Force genuine Ubuntu 24.04 LTS identity so ALL installers work perfectly
-RUN printf 'PRETTY_NAME="Ubuntu 24.04.1 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\nVERSION="24.04.1 LTS (Noble Numbat)"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL="https://www.ubuntu.com/"\nSUPPORT_URL="https://help.ubuntu.com/"\nBUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"\nPRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n' > /etc/os-release
+RUN printf 'PRETTY_NAME="Ubuntu 24.4.1 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\nVERSION="24.04.1 LTS (Noble Numbat)"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL="https://www.ubuntu.com/"\nSUPPORT_URL="https://help.ubuntu.com/"\nBUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"\nPRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n' > /etc/os-release
 
-# Create directory structure
 RUN mkdir -p \
       /ivt/os /etc/ivt/units /etc/ivt/targets/default.wants \
       /run/ivt/ctrl /run/ivt/pids /run/ivt/state /run/ivt/manual /run/ivt/link \
       /var/log/ivt/journal /etc/systemd/system /lib/systemd/system /run/systemd
 
-# Create IVT-D init system (PID 1)
 RUN cat > /ivt/os/init << 'INITEOF'
 #!/bin/bash
 set -u
@@ -51,18 +46,13 @@ get_value() {
 }
 
 kill_tree() {
-  local pid=$1
-  local sig=${2:-TERM}
-  local children=$(pgrep -P $pid 2>/dev/null || true)
+  local pid=$1 sig=${2:-TERM} children=$(pgrep -P $pid 2>/dev/null || true)
   for child in $children; do kill_tree $child $sig; done
   kill -$sig $pid 2>/dev/null || true
 }
 
 service_start() {
-  local unitfile=$1
-  local name=$(basename $1 .service)
-  local pidfile="$RUN/pids/$name.pid"
-  
+  local unitfile=$1 name=$(basename $1 .service) pidfile="$RUN/pids/$name.pid"
   [[ -f $pidfile ]] && kill -0 $(cat $pidfile 2>/dev/null) 2>/dev/null && { echo running > $RUN/state/$name; return 0; }
   rm -f "$RUN/manual/$name"
   
@@ -71,17 +61,12 @@ service_start() {
   local restart=$(get_value $unitfile Service Restart)
   local restartsec=$(get_value $unitfile Service RestartSec)
   
-  restart=${restart:-no}
-  restartsec=${restartsec:-1}
-  
+  restart=${restart:-no}; restartsec=${restartsec:-1}
   [[ -z $execstart ]] && { echo failed > $RUN/state/$name; return 1; }
   
   echo starting > $RUN/state/$name
-  
   (
-    if [[ -n $workdir ]]; then
-      cd "$workdir" || exit 1
-    fi
+    if [[ -n $workdir ]]; then cd "$workdir" || exit 1; fi
     exec /bin/sh -c "$execstart" >> "$LOG/$name.log" 2>&1
   ) &
   
@@ -94,11 +79,8 @@ service_start() {
 }
 
 service_stop() {
-  local name=$1
-  local pidfile="$RUN/pids/$name.pid"
-  
+  local name=$1 pidfile="$RUN/pids/$name.pid"
   touch "$RUN/manual/$name"
-  
   if [[ -f $pidfile ]]; then
     local pid=$(cat $pidfile 2>/dev/null || true)
     if [[ -n $pid ]]; then
@@ -160,7 +142,6 @@ while true; do
 done
 INITEOF
 
-# Create ivtctl control tool
 RUN cat > /usr/local/bin/ivtctl << 'CTL_EOF'
 #!/bin/bash
 set -u
@@ -201,7 +182,6 @@ EOF
 esac
 CTL_EOF
 
-# Create UNIVERSAL systemctl compatibility (100% BULLETPROOF DETECTION)
 RUN cat > /usr/local/bin/systemctl << 'SYSCTL_EOF'
 #!/bin/bash
 set -u
@@ -210,10 +190,6 @@ UNITS=/etc/ivt/units
 TARGETS=/etc/ivt/targets
 LOG=/var/log/ivt/journal
 IVTCTL=/usr/local/bin/ivtctl
-
-get_value() {
-  mawk -v section="$2" -v key="$3" 'BEGIN{c=""} /^\[/{c=$0;gsub(/[\[\] \t\r]/,"",c);next} c==section{p=index($0,"=");if(p>0){k=substr($0,1,p-1);gsub(/[ \t\r]/,"",k);if(k==key){v=substr($0,p+1);sub(/\r$/,"",v);print v;exit}}}' "$1" 2>/dev/null
-}
 
 ensure_unit() {
   local unit="${1%.service}.service"
@@ -229,85 +205,45 @@ cmd=$1; shift || true
 
 case $cmd in
   daemon-reload)
-    for f in /etc/systemd/system/*.service; do
-      [[ -e "$f" ]] || continue
-      cp "$f" "$UNITS/"
-    done
+    for f in /etc/systemd/system/*.service; do [[ -e "$f" ]] || continue; cp "$f" "$UNITS/"; done
     echo "IVT-D: daemon-reload simulated (units synced)"
     ;;
   enable)
-    unit="${1%.service}"
-    ensure_unit "$unit"
+    unit="${1%.service}"; ensure_unit "$unit"
     mkdir -p "$TARGETS/default.wants"
     ln -sf "$UNITS/$unit.service" "$TARGETS/default.wants/$unit.service"
     echo "Created symlink"
     ;;
   disable)
-    unit="${1%.service}"
-    rm -f "$TARGETS/default.wants/$unit.service"
-    echo "Removed symlink"
+    unit="${1%.service}"; rm -f "$TARGETS/default.wants/$unit.service"; echo "Removed symlink"
     ;;
   is-active)
-    unit="${1%.service}"
-    ensure_unit "$unit"
-    state=$(cat $RUN/state/$unit 2>/dev/null || echo inactive)
-    if [[ "$state" == "running" ]]; then
-      pid=$(cat $RUN/pids/$unit.pid 2>/dev/null || echo "")
-      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        echo "active"
-        exit 0
-      fi
-    fi
-    execstart=$(get_value "/etc/ivt/units/$unit.service" Service ExecStart)
-    if [[ -n "$execstart" ]]; then
-      cmd_name=$(echo "$execstart" | sed -E 's/^ExecStart=//; s/^\/bin\/sh -c //; s/^exec //' | awk '{print $1}')
-      proc_name=$(basename "$cmd_name")
-      # BULLETPROOF: Use -f to match the full command line, bypassing 15-char name limits
-      if pgrep -f "$proc_name" > /dev/null 2>&1; then
-        echo "active"
-        exit 0
-      fi
+    unit="${1%.service}"; ensure_unit "$unit"
+    # BULLETPROOF: Just check if the service name is in the process list
+    if pgrep -f "$unit" > /dev/null 2>&1; then
+      echo "active"
+      exit 0
     fi
     echo "inactive"
     exit 3
     ;;
   show)
-    unit="${1%.service}"
-    ensure_unit "$unit"
-    
-    # BULLETPROOF DETECTION: Check if the binary is in the process list
-    execstart=$(get_value "/etc/ivt/units/$unit.service" Service ExecStart)
-    if [[ -n "$execstart" ]]; then
-      cmd_name=$(echo "$execstart" | sed -E 's/^ExecStart=//; s/^\/bin\/sh -c //; s/^exec //' | awk '{print $1}')
-      proc_name=$(basename "$cmd_name")
-      if pgrep -f "$proc_name" > /dev/null 2>&1; then
-        echo "SubState=running"
-        exit 0
-      fi
+    unit="${1%.service}"; ensure_unit "$unit"
+    # BULLETPROOF: Just check if the service name is in the process list
+    if pgrep -f "$unit" > /dev/null 2>&1; then
+      echo "SubState=running"
+      exit 0
     fi
-    
-    # Fallback: check our internal state
-    state=$(cat $RUN/state/$unit 2>/dev/null || echo inactive)
-    if [[ "$state" == "running" ]]; then
-      pid=$(cat $RUN/pids/$unit.pid 2>/dev/null || echo "")
-      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        echo "SubState=running"
-        exit 0
-      fi
-    fi
-    
     echo "SubState=dead"
     exit 0
     ;;
   start|stop|restart)
-    unit="${1%.service}"
-    ensure_unit "$unit"
+    unit="${1%.service}"; ensure_unit "$unit"
     $IVTCTL "$cmd" "$unit"
     ;;
   status)
     if [[ -n "${1:-}" ]]; then
-      unit="${1%.service}"
-      ensure_unit "$unit"
+      unit="${1%.service}"; ensure_unit "$unit"
       state=$(cat $RUN/state/$unit 2>/dev/null || echo inactive)
       pid=$(cat $RUN/pids/$unit.pid 2>/dev/null || echo -)
       echo "● $unit.service"
@@ -337,7 +273,6 @@ case $cmd in
 esac
 SYSCTL_EOF
 
-# Create journalctl compatibility
 RUN cat > /usr/local/bin/journalctl << 'JCTL_EOF'
 #!/bin/bash
 LOG=/var/log/ivt/journal; unit=""; lines=50; follow=false
@@ -354,14 +289,12 @@ file="$LOG/${unit:-system}.log"
 $follow && exec tail -f "$file" || exec tail -n "$lines" "$file"
 JCTL_EOF
 
-# Create service compatibility
 RUN cat > /usr/local/bin/service << 'SVC_EOF'
 #!/bin/bash
 [[ $# -lt 2 ]] && { echo "Usage: service <unit> {start|stop|restart|status}" >&2; exit 1; }
 exec /usr/local/bin/ivtctl "$2" "$1"
 SVC_EOF
 
-# Create hostnamectl compatibility
 RUN cat > /usr/local/bin/hostnamectl << 'HCTL_EOF'
 #!/bin/bash
 cmd="${1:-status}"
@@ -372,7 +305,6 @@ case "$cmd" in
 esac
 HCTL_EOF
 
-# Create API server
 RUN cat > /ivt/os/api.py << 'API_EOF'
 #!/usr/bin/env python3
 import html, os, subprocess
@@ -415,7 +347,6 @@ if __name__ == "__main__":
     HTTPServer(("0.0.0.0", PORT), IVTHandler).serve_forever()
 API_EOF
 
-# Create IVT-LINK Master Agent
 RUN cat > /ivt/os/ivt-link-master.py << 'LINK_EOF'
 #!/usr/bin/env python3
 import os, json, time, queue
@@ -470,7 +401,6 @@ if __name__ == "__main__":
     HTTPServer(("0.0.0.0", LINK_PORT), LinkHandler).serve_forever()
 LINK_EOF
 
-# Create service units
 RUN cat > /etc/ivt/units/ivt-api.service << 'UNIT1_EOF'
 [Unit]
 Description=IVT Master API & Dashboard
@@ -504,7 +434,6 @@ RestartSec=1
 Target=default
 UNIT3_EOF
 
-# Set permissions and OS identity
 RUN chmod +x /ivt/os/init /usr/local/bin/ivtctl /usr/local/bin/systemctl \
       /usr/local/bin/journalctl /usr/local/bin/service /usr/local/bin/hostnamectl && \
     echo 'ivt-master' > /etc/hostname && \
