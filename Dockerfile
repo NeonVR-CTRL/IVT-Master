@@ -6,20 +6,21 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     IVT_ROLE=master
 
-# 1. Standard Docker policy-rc.d fix to prevent apt service hangs
-RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d
+# 1. Standard Docker policy-rc.d fix + Docker marker for x-ui.sh detection
+RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d && \
+    touch /.dockerenv
 
-# 2. Minimal, curated dependency tree. No bloat.
+# 2. Minimal dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       bash coreutils procps util-linux mawk ca-certificates curl sudo python3-minimal systemd-sysv && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* /var/cache/apt/*
 
-# 3. 100% Genuine Ubuntu 24.04 LTS identity. All installers will accept this.
+# 3. 100% Genuine Ubuntu 24.04 LTS identity
 RUN printf 'PRETTY_NAME="Ubuntu 24.04.1 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\nVERSION="24.04.1 LTS (Noble Numbat)"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL="https://www.ubuntu.com/"\nSUPPORT_URL="https://help.ubuntu.com/"\nBUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"\nPRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n' > /etc/os-release
 
-# 4. Organized, purpose-built directory structure
+# 4. Directory structure
 RUN mkdir -p \
       /ivt/os \
       /etc/ivt/units /etc/ivt/targets/default.wants /etc/ivt/targets/multi-user.target.wants \
@@ -28,7 +29,7 @@ RUN mkdir -p \
       /etc/systemd/system /lib/systemd/system /run/systemd
 
 # ==============================================================================
-# 5. ADVANCED INIT SYSTEM (PID 1): Bulletproof Environment & Process Handling
+# 5. INIT SYSTEM (PID 1)
 # ==============================================================================
 RUN cat > /ivt/os/init << 'INITEOF'
 #!/bin/bash
@@ -114,14 +115,10 @@ service_start() {
   echo "starting" > "$RUN_DIR/state/$name"
   
   (
-    # Disable strict exit-on-error for setup phase to prevent silent crashes
     set +e
-    
     if [[ -n "$workdir" ]]; then
       cd "$workdir" || exit 1
     fi
-    
-    # BULLETPROOF: Handle EnvironmentFile (strip leading '-' if present)
     if [[ -n "$env_file" ]]; then
       local clean_env="${env_file#-}"
       if [[ -f "$clean_env" ]]; then
@@ -130,17 +127,11 @@ service_start() {
         set +a
       fi
     fi
-    
-    # BULLETPROOF: Handle inline Environment variables
     if [[ -n "$env_vars" ]]; then
-      env_vars="${env_vars%\"}"
-      env_vars="${env_vars#\"}"
-      env_vars="${env_vars%\'}"
-      env_vars="${env_vars#\'}"
+      env_vars="${env_vars%\"}"; env_vars="${env_vars#\"}"
+      env_vars="${env_vars%\'}"; env_vars="${env_vars#\'}"
       export $env_vars
     fi
-    
-    # Re-enable strict mode for the actual execution
     set -e
     exec /bin/sh -c "$execstart" >> "$LOG/$name.log" 2>&1
   ) &
@@ -156,9 +147,7 @@ service_start() {
 service_stop() {
   local name="$1"
   local pidfile="$RUN_DIR/pids/$name.pid"
-  
   touch "$RUN_DIR/manual/$name"
-  
   if [[ -f "$pidfile" ]]; then
     local pid
     pid=$(cat "$pidfile" 2>/dev/null || true)
@@ -181,13 +170,9 @@ service_stop() {
 shutdown_system() {
   log_system "shutdown requested"
   local pid
-  for pid in "${!PIDS[@]}"; do
-    kill_tree "$pid" TERM
-  done
+  for pid in "${!PIDS[@]}"; do kill_tree "$pid" TERM; done
   sleep 1
-  for pid in "${!PIDS[@]}"; do
-    kill_tree "$pid" KILL
-  done
+  for pid in "${!PIDS[@]}"; do kill_tree "$pid" KILL; done
   exit 0
 }
 
@@ -195,17 +180,14 @@ main() {
   local target cmd name policy restart_policy restart_sec
   target=$(cat "$TARGET_FILE" 2>/dev/null || echo "default")
   local fifo="$RUN_DIR/ctrl/control.fifo"
-  
   rm -f "$fifo"
   mkfifo "$fifo"
   exec 3<>"$fifo"
 
   log_system "IVT-D MASTER starting target=$target"
-
   for unit in "$TARGETS/$target.wants"/*.service; do
     [[ -e "$unit" ]] && service_start "$unit"
   done
-
   trap shutdown_system TERM INT
 
   while true; do
@@ -213,30 +195,22 @@ main() {
       case "$cmd" in
         start:*) service_start "$UNITS/${cmd#start:}.service" ;;
         stop:*) service_stop "${cmd#stop:}" ;;
-        restart:*) 
-          service_stop "${cmd#restart:}"
-          sleep 0.2
-          service_start "$UNITS/${cmd#restart:}.service"
-          ;;
+        restart:*) service_stop "${cmd#restart:}"; sleep 0.2; service_start "$UNITS/${cmd#restart:}.service" ;;
         shutdown|poweroff) shutdown_system ;;
       esac
     fi
-    
     for pid in "${!PIDS[@]}"; do
       if ! kill -0 "$pid" 2>/dev/null; then
         name="${PIDS[$pid]}"
         unset "PIDS[$pid]" 2>/dev/null || true
         rm -f "$RUN_DIR/pids/$name.pid"
-        
         if [[ -f "$RUN_DIR/manual/$name" ]]; then
           echo "stopped" > "$RUN_DIR/state/$name"
           continue
         fi
-        
         policy="${RESTART[$name]:-no:1}"
         restart_policy="${policy%%:*}"
         restart_sec="${policy##*:}"
-        
         if [[ "$restart_policy" == "always" || "$restart_policy" == "on-failure" ]]; then
           log_system "restarting $name in ${restart_sec}s"
           sleep "$restart_sec" 2>/dev/null || true
@@ -246,16 +220,14 @@ main() {
         fi
       fi
     done
-    
     sleep 0.5
   done
 }
-
 main "$@"
 INITEOF
 
 # ==============================================================================
-# 6. 100% UBUNTU COMMAND NAMES: systemctl, service, journalctl
+# 6. systemctl (with FIXED 'show' argument parsing)
 # ==============================================================================
 RUN cat > /usr/local/bin/systemctl << 'SYSCTL_EOF'
 #!/bin/bash
@@ -264,24 +236,6 @@ RUN_DIR=/run/ivt
 UNITS=/etc/ivt/units
 TARGETS=/etc/ivt/targets
 LOG=/var/log/ivt/journal
-
-get_value() {
-  local file="$1" section="$2" key="$3"
-  mawk -v section="$section" -v key="$key" '
-    BEGIN { c="" }
-    /^\[/ { c=$0; gsub(/[\[\] \t\r]/,"",c); next }
-    c == section {
-      p = index($0,"=")
-      if (p > 0) {
-        k = substr($0,1,p-1); gsub(/[ \t\r]/,"",k)
-        if (k == key) {
-          v = substr($0,p+1); sub(/\r$/,"",v)
-          print v; exit
-        }
-      }
-    }
-  ' "$file" 2>/dev/null
-}
 
 ensure_unit() {
   local unit="${1%.service}.service"
@@ -303,19 +257,31 @@ send_cmd() {
   fi
 }
 
+# FIX: extract the real unit name, skipping all flags like --property=X
+find_unit_arg() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      -*) continue ;;
+      *) echo "${arg%.service}"; return ;;
+    esac
+  done
+  echo ""
+}
+
 main() {
   local cmd="${1:-}"
   shift || true
 
   case "$cmd" in
     start|stop|restart)
-      local unit="${1%.service}"
+      local unit; unit=$(find_unit_arg "$@")
       ensure_unit "$unit"
       send_cmd "$cmd:$unit"
       echo "$cmd request sent: $unit"
       ;;
     enable)
-      local unit="${1%.service}"
+      local unit; unit=$(find_unit_arg "$@")
       ensure_unit "$unit"
       mkdir -p "$TARGETS/default.wants" "$TARGETS/multi-user.target.wants"
       ln -sf "$UNITS/$unit.service" "$TARGETS/default.wants/$unit.service" 2>/dev/null || true
@@ -323,14 +289,13 @@ main() {
       echo "Created symlink"
       ;;
     disable)
-      local unit="${1%.service}"
+      local unit; unit=$(find_unit_arg "$@")
       rm -f "$TARGETS/default.wants/$unit.service" "$TARGETS/multi-user.target.wants/$unit.service"
       echo "Removed symlink"
       ;;
     is-active)
-      local unit="${1%.service}"
+      local unit; unit=$(find_unit_arg "$@")
       ensure_unit "$unit"
-      # BULLETPROOF: pgrep -f matches the full command line
       if pgrep -f "$unit" > /dev/null 2>&1; then
         echo "active"; exit 0
       fi
@@ -344,7 +309,7 @@ main() {
       echo "inactive"; exit 3
       ;;
     is-enabled)
-      local unit="${1%.service}"
+      local unit; unit=$(find_unit_arg "$@")
       ensure_unit "$unit"
       if [[ -e "$TARGETS/default.wants/$unit.service" || -e "$TARGETS/multi-user.target.wants/$unit.service" ]]; then
         echo "enabled"; exit 0
@@ -353,9 +318,9 @@ main() {
       fi
       ;;
     show)
-      local unit="${1%.service}"
+      # FIX: use find_unit_arg to skip --property=X and any other flags
+      local unit; unit=$(find_unit_arg "$@")
       ensure_unit "$unit"
-      # BULLETPROOF: pgrep -f matches the full command line
       if pgrep -f "$unit" > /dev/null 2>&1; then
         echo "SubState=running"; exit 0
       fi
@@ -377,7 +342,7 @@ main() {
       echo "IVT-D: daemon-reload simulated (units synced)"
       ;;
     status)
-      if [[ -n "${1:-}" ]]; then
+      if [[ -n "${1:-}" && "${1}" != -* ]]; then
         local unit="${1%.service}"
         ensure_unit "$unit"
         local state=$(cat "$RUN_DIR/state/$unit" 2>/dev/null || echo "inactive")
@@ -410,12 +375,10 @@ main() {
       exit 0
       ;;
     *)
-      # Gracefully ignore unknown flags to prevent breaking apt/invoke-rc.d
       exit 0
       ;;
   esac
 }
-
 main "$@"
 SYSCTL_EOF
 
@@ -447,14 +410,9 @@ done
 unit="${unit%.service}"
 file="$LOG/${unit:-system}.log"
 if [[ ! -f "$file" ]]; then
-  echo "-- No entries --"
-  exit 0
+  echo "-- No entries --"; exit 0
 fi
-if $follow; then
-  exec tail -f "$file"
-else
-  exec tail -n "$lines" "$file"
-fi
+if $follow; then exec tail -f "$file"; else exec tail -n "$lines" "$file"; fi
 JCTL_EOF
 
 RUN cat > /usr/local/bin/hostnamectl << 'HCTL_EOF'
@@ -472,7 +430,7 @@ main "$@"
 HCTL_EOF
 
 # ==============================================================================
-# 7. CORE SERVICES & AGENTS
+# 7. CORE SERVICES
 # ==============================================================================
 RUN cat > /ivt/os/api.py << 'API_EOF'
 #!/usr/bin/env python3
@@ -517,7 +475,6 @@ RUN cat > /ivt/os/ivt-link-master.py << 'LINK_EOF'
 #!/usr/bin/env python3
 import os, json, time, queue
 from http.server import BaseHTTPRequestHandler, HTTPServer
-WORKER_URL = os.environ.get("IVT_WORKER_URL", "")
 LINK_SECRET = os.environ.get("IVT_LINK_SECRET", "default-secret")
 LINK_PORT = int(os.environ.get("LINK_PORT", 8081))
 task_queue = queue.Queue()
@@ -561,7 +518,7 @@ if __name__ == "__main__":
 LINK_EOF
 
 # ==============================================================================
-# 8. SERVICE DEFINITIONS & PERMISSIONS
+# 8. SERVICE UNITS + PERMISSIONS
 # ==============================================================================
 RUN cat > /etc/ivt/units/ivt-api.service << 'UNIT1_EOF'
 [Unit]
