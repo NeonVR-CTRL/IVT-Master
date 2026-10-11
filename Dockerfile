@@ -22,13 +22,13 @@ RUN printf 'PRETTY_NAME="Ubuntu 24.04.1 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\
 # 4. Organized, purpose-built directory structure
 RUN mkdir -p \
       /ivt/os \
-      /etc/ivt/units /etc/ivt/targets/default.wants \
+      /etc/ivt/units /etc/ivt/targets/default.wants /etc/ivt/targets/multi-user.target.wants \
       /run/ivt/ctrl /run/ivt/pids /run/ivt/state /run/ivt/manual /run/ivt/link \
       /var/log/ivt/journal \
       /etc/systemd/system /lib/systemd/system /run/systemd
 
 # ==============================================================================
-# 5. ADVANCED INIT SYSTEM (PID 1): Wrapped in main() for perfect scoping
+# 5. ADVANCED INIT SYSTEM (PID 1): Now fully supports Environment & EnvironmentFile
 # ==============================================================================
 RUN cat > /ivt/os/init << 'INITEOF'
 #!/bin/bash
@@ -94,11 +94,13 @@ service_start() {
   
   rm -f "$RUN_DIR/manual/$name"
   
-  local execstart restart restartsec workdir
+  local execstart workdir restart restartsec env_file env_vars
   execstart=$(get_value "$unitfile" Service ExecStart)
   workdir=$(get_value "$unitfile" Service WorkingDirectory)
   restart=$(get_value "$unitfile" Service Restart)
   restartsec=$(get_value "$unitfile" Service RestartSec)
+  env_file=$(get_value "$unitfile" Service EnvironmentFile)
+  env_vars=$(get_value "$unitfile" Service Environment)
   
   restart="${restart:-no}"
   restartsec="${restartsec:-1}"
@@ -115,6 +117,26 @@ service_start() {
     if [[ -n "$workdir" ]]; then
       cd "$workdir" || exit 1
     fi
+    
+    # UNIVERSAL COMPATIBILITY: Handle EnvironmentFile (strip leading '-' if present)
+    if [[ -n "$env_file" ]]; then
+      local clean_env="${env_file#-}"
+      if [[ -f "$clean_env" ]]; then
+        set -a
+        source "$clean_env"
+        set +a
+      fi
+    fi
+    
+    # UNIVERSAL COMPATIBILITY: Handle inline Environment variables
+    if [[ -n "$env_vars" ]]; then
+      env_vars="${env_vars%\"}"
+      env_vars="${env_vars#\"}"
+      env_vars="${env_vars%\'}"
+      env_vars="${env_vars#\'}"
+      export $env_vars
+    fi
+    
     exec /bin/sh -c "$execstart" >> "$LOG/$name.log" 2>&1
   ) &
   
@@ -228,7 +250,7 @@ main "$@"
 INITEOF
 
 # ==============================================================================
-# 6. SMART CONTROL TOOLS: Wrapped in main() for perfect scoping
+# 6. SMART CONTROL TOOLS
 # ==============================================================================
 RUN cat > /usr/local/bin/ivtctl << 'CTL_EOF'
 #!/bin/bash
@@ -253,7 +275,7 @@ status_pretty() {
     state=$(cat "$RUN_DIR/state/$name" 2>/dev/null || echo "inactive")
     pid=$(cat "$RUN_DIR/pids/$name.pid" 2>/dev/null || echo "-")
     enabled="no"
-    [[ -e "$TARGETS/default.wants/$name.service" ]] && enabled="yes"
+    [[ -e "$TARGETS/default.wants/$name.service" || -e "$TARGETS/multi-user.target.wants/$name.service" ]] && enabled="yes"
     printf '%-20s %-10s %-8s %-8s\n' "$name" "$state" "$pid" "$enabled"
   done
 }
@@ -267,9 +289,7 @@ main() {
       send_cmd "$cmd:${1%.service}"
       echo "$cmd request sent: ${1%.service}" 
       ;;
-    status) 
-      status_pretty 
-      ;;
+    status) status_pretty ;;
     journal) 
       local unit="${1%.service}" lines="${2:-50}" file
       [[ "$unit" == "system" || -z "$unit" ]] && file="$LOG/system.log" || file="$LOG/$unit.log"
@@ -296,7 +316,7 @@ EOF
     remove) 
       local unit="${1%.service}"
       send_cmd "stop:$unit" 2>/dev/null || true
-      rm -f "$TARGETS/default.wants/$unit.service" "$UNITS/$unit.service" "$RUN_DIR/state/$unit" "$RUN_DIR/pids/$unit.pid" "$RUN_DIR/manual/$unit"
+      rm -f "$TARGETS/default.wants/$unit.service" "$TARGETS/multi-user.target.wants/$unit.service" "$UNITS/$unit.service" "$RUN_DIR/state/$unit" "$RUN_DIR/pids/$unit.pid" "$RUN_DIR/manual/$unit"
       echo "removed $unit"
       ;;
     sys) 
@@ -308,16 +328,9 @@ EOF
       free -m 2>/dev/null || true
       df -h / 2>/dev/null || true
       ;;
-    shell) 
-      exec /bin/bash 
-      ;;
-    shutdown) 
-      send_cmd "shutdown"
-      echo "shutdown request sent" 
-      ;;
-    *) 
-      echo "Usage: ivtctl {start|stop|restart|status|journal|new|remove|sys|shell|shutdown}" 
-      ;;
+    shell) exec /bin/bash ;;
+    shutdown) send_cmd "shutdown"; echo "shutdown request sent" ;;
+    *) echo "Usage: ivtctl {start|stop|restart|status|journal|new|remove|sys|shell|shutdown}" ;;
   esac
 }
 
@@ -360,57 +373,54 @@ main() {
       local unit="${1%.service}"
       ensure_unit "$unit"
       mkdir -p "$TARGETS/default.wants"
+      mkdir -p "$TARGETS/multi-user.target.wants"
       ln -sf "$UNITS/$unit.service" "$TARGETS/default.wants/$unit.service"
+      ln -sf "$UNITS/$unit.service" "$TARGETS/multi-user.target.wants/$unit.service"
       echo "Created symlink"
       ;;
     disable)
       local unit="${1%.service}"
-      rm -f "$TARGETS/default.wants/$unit.service"
+      rm -f "$TARGETS/default.wants/$unit.service" "$TARGETS/multi-user.target.wants/$unit.service"
       echo "Removed symlink"
       ;;
     is-active)
       local unit="${1%.service}"
       ensure_unit "$unit"
-      
-      # BULLETPROOF: Universal ps fallback
       if ps -ef | grep -v grep | grep -q "$unit"; then
-        echo "active"
-        exit 0
+        echo "active"; exit 0
       fi
-      
       local state=$(cat "$RUN_DIR/state/$unit" 2>/dev/null || echo "inactive")
       if [[ "$state" == "running" ]]; then
         local pid=$(cat "$RUN_DIR/pids/$unit.pid" 2>/dev/null || echo "")
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-          echo "active"
-          exit 0
+          echo "active"; exit 0
         fi
       fi
-      
-      echo "inactive"
-      exit 3
+      echo "inactive"; exit 3
+      ;;
+    is-enabled)
+      local unit="${1%.service}"
+      ensure_unit "$unit"
+      if [[ -e "$TARGETS/default.wants/$unit.service" || -e "$TARGETS/multi-user.target.wants/$unit.service" ]]; then
+        echo "enabled"; exit 0
+      else
+        echo "disabled"; exit 1
+      fi
       ;;
     show)
       local unit="${1%.service}"
       ensure_unit "$unit"
-      
-      # BULLETPROOF: Universal ps fallback (matches exactly what x-ui.sh expects)
       if ps -ef | grep -v grep | grep -q "$unit"; then
-        echo "SubState=running"
-        exit 0
+        echo "SubState=running"; exit 0
       fi
-      
       local state=$(cat "$RUN_DIR/state/$unit" 2>/dev/null || echo "inactive")
       if [[ "$state" == "running" ]]; then
         local pid=$(cat "$RUN_DIR/pids/$unit.pid" 2>/dev/null || echo "")
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-          echo "SubState=running"
-          exit 0
+          echo "SubState=running"; exit 0
         fi
       fi
-      
-      echo "SubState=dead"
-      exit 0
+      echo "SubState=dead"; exit 0
       ;;
     start|stop|restart)
       local unit="${1%.service}"
@@ -441,7 +451,7 @@ main() {
           state=$(cat "$RUN_DIR/state/$unit_name" 2>/dev/null || echo "inactive")
           pid=$(cat "$RUN_DIR/pids/$unit_name.pid" 2>/dev/null || echo "-")
           enabled="no"
-          [[ -e "$TARGETS/default.wants/$unit_name.service" ]] && enabled="yes"
+          [[ -e "$TARGETS/default.wants/$unit_name.service" || -e "$TARGETS/multi-user.target.wants/$unit_name.service" ]] && enabled="yes"
           printf '%-20s %-10s %-8s %-8s\n' "$unit_name" "$state" "$pid" "$enabled"
         done
       fi 
