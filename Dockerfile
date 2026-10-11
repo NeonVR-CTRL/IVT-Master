@@ -28,24 +28,24 @@ RUN mkdir -p \
       /etc/systemd/system /lib/systemd/system /run/systemd
 
 # ==============================================================================
-# 5. ADVANCED INIT SYSTEM (PID 1): Smart, safe, self-healing, zero scoping bugs
+# 5. ADVANCED INIT SYSTEM (PID 1): Wrapped in main() for perfect scoping
 # ==============================================================================
 RUN cat > /ivt/os/init << 'INITEOF'
 #!/bin/bash
 set -euo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-RUN=/run/ivt
+RUN_DIR=/run/ivt
 UNITS=/etc/ivt/units
 TARGETS=/etc/ivt/targets
 LOG=/var/log/ivt/journal
 TARGET_FILE=/etc/ivt/default.target
 
-mkdir -p "$RUN"/{ctrl,pids,state,manual,link} "$LOG"
+mkdir -p "$RUN_DIR"/{ctrl,pids,state,manual,link} "$LOG"
 
 [[ ! -f /etc/machine-id ]] && cat /proc/sys/kernel/random/uuid > /etc/machine-id
-cat /proc/sys/kernel/random/uuid > "$RUN/boot-id"
-date +%s > "$RUN/boottime"
+cat /proc/sys/kernel/random/uuid > "$RUN_DIR/boot-id"
+date +%s > "$RUN_DIR/boottime"
 
 declare -A PIDS=()
 declare -A RESTART=()
@@ -85,14 +85,14 @@ service_start() {
   local unitfile="$1"
   local name
   name=$(basename "$1" .service)
-  local pidfile="$RUN/pids/$name.pid"
+  local pidfile="$RUN_DIR/pids/$name.pid"
   
   if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; then
-    echo "running" > "$RUN/state/$name"
+    echo "running" > "$RUN_DIR/state/$name"
     return 0
   fi
   
-  rm -f "$RUN/manual/$name"
+  rm -f "$RUN_DIR/manual/$name"
   
   local execstart restart restartsec workdir
   execstart=$(get_value "$unitfile" Service ExecStart)
@@ -104,12 +104,12 @@ service_start() {
   restartsec="${restartsec:-1}"
   
   if [[ -z "$execstart" ]]; then
-    echo "failed" > "$RUN/state/$name"
+    echo "failed" > "$RUN_DIR/state/$name"
     log_system "unit $name has no ExecStart"
     return 1
   fi
   
-  echo "starting" > "$RUN/state/$name"
+  echo "starting" > "$RUN_DIR/state/$name"
   
   (
     if [[ -n "$workdir" ]]; then
@@ -120,7 +120,7 @@ service_start() {
   
   local pid=$!
   echo "$pid" > "$pidfile"
-  echo "running" > "$RUN/state/$name"
+  echo "running" > "$RUN_DIR/state/$name"
   PIDS[$pid]="$name"
   RESTART[$name]="$restart:$restartsec"
   log_system "started $name pid=$pid"
@@ -128,9 +128,9 @@ service_start() {
 
 service_stop() {
   local name="$1"
-  local pidfile="$RUN/pids/$name.pid"
+  local pidfile="$RUN_DIR/pids/$name.pid"
   
-  touch "$RUN/manual/$name"
+  touch "$RUN_DIR/manual/$name"
   
   if [[ -f "$pidfile" ]]; then
     local pid
@@ -147,7 +147,7 @@ service_stop() {
     fi
     rm -f "$pidfile"
   fi
-  echo "stopped" > "$RUN/state/$name"
+  echo "stopped" > "$RUN_DIR/state/$name"
   log_system "stopped $name"
 }
 
@@ -164,73 +164,85 @@ shutdown_system() {
   exit 0
 }
 
-# --- MAIN EXECUTION LOOP (NO 'local' KEYWORDS HERE) ---
-TARGET=$(cat "$TARGET_FILE" 2>/dev/null || echo "default")
-FIFO="$RUN/ctrl/control.fifo"
-rm -f "$FIFO"
-mkfifo "$FIFO"
-exec 3<>"$FIFO"
-
-log_system "IVT-D MASTER starting target=$TARGET"
-
-for unit in "$TARGETS/$TARGET.wants"/*.service; do
-  [[ -e "$unit" ]] && service_start "$unit"
-done
-
-trap shutdown_system TERM INT
-
-while true; do
-  if read -r -t 1 -u 3 cmd; then
-    case "$cmd" in
-      start:*) service_start "$UNITS/${cmd#start:}.service" ;;
-      stop:*) service_stop "${cmd#stop:}" ;;
-      restart:*) 
-        service_stop "${cmd#restart:}"
-        sleep 0.2
-        service_start "$UNITS/${cmd#restart:}.service"
-        ;;
-      shutdown|poweroff) shutdown_system ;;
-    esac
-  fi
+main() {
+  local target cmd name policy restart_policy restart_sec
+  target=$(cat "$TARGET_FILE" 2>/dev/null || echo "default")
+  local fifo="$RUN_DIR/ctrl/control.fifo"
   
-  for pid in "${!PIDS[@]}"; do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      name="${PIDS[$pid]}"
-      unset "PIDS[$pid]" 2>/dev/null || true
-      rm -f "$RUN/pids/$name.pid"
-      
-      if [[ -f "$RUN/manual/$name" ]]; then
-        echo "stopped" > "$RUN/state/$name"
-        continue
-      fi
-      
-      policy="${RESTART[$name]:-no:1}"
-      restart_policy="${policy%%:*}"
-      restart_sec="${policy##*:}"
-      
-      if [[ "$restart_policy" == "always" || "$restart_policy" == "on-failure" ]]; then
-        log_system "restarting $name in ${restart_sec}s"
-        sleep "$restart_sec" 2>/dev/null || true
-        service_start "$UNITS/$name.service"
-      else
-        echo "exited" > "$RUN/state/$name"
-      fi
-    fi
+  rm -f "$fifo"
+  mkfifo "$fifo"
+  exec 3<>"$fifo"
+
+  log_system "IVT-D MASTER starting target=$target"
+
+  for unit in "$TARGETS/$target.wants"/*.service; do
+    [[ -e "$unit" ]] && service_start "$unit"
   done
-  
-  sleep 0.5
-done
+
+  trap shutdown_system TERM INT
+
+  while true; do
+    if read -r -t 1 -u 3 cmd; then
+      case "$cmd" in
+        start:*) service_start "$UNITS/${cmd#start:}.service" ;;
+        stop:*) service_stop "${cmd#stop:}" ;;
+        restart:*) 
+          service_stop "${cmd#restart:}"
+          sleep 0.2
+          service_start "$UNITS/${cmd#restart:}.service"
+          ;;
+        shutdown|poweroff) shutdown_system ;;
+      esac
+    fi
+    
+    for pid in "${!PIDS[@]}"; do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        name="${PIDS[$pid]}"
+        unset "PIDS[$pid]" 2>/dev/null || true
+        rm -f "$RUN_DIR/pids/$name.pid"
+        
+        if [[ -f "$RUN_DIR/manual/$name" ]]; then
+          echo "stopped" > "$RUN_DIR/state/$name"
+          continue
+        fi
+        
+        policy="${RESTART[$name]:-no:1}"
+        restart_policy="${policy%%:*}"
+        restart_sec="${policy##*:}"
+        
+        if [[ "$restart_policy" == "always" || "$restart_policy" == "on-failure" ]]; then
+          log_system "restarting $name in ${restart_sec}s"
+          sleep "$restart_sec" 2>/dev/null || true
+          service_start "$UNITS/$name.service"
+        else
+          echo "exited" > "$RUN_DIR/state/$name"
+        fi
+      fi
+    done
+    
+    sleep 0.5
+  done
+}
+
+main "$@"
 INITEOF
 
 # ==============================================================================
-# 6. SMART CONTROL TOOLS: ivtctl & systemctl
+# 6. SMART CONTROL TOOLS: Wrapped in main() for perfect scoping
 # ==============================================================================
 RUN cat > /usr/local/bin/ivtctl << 'CTL_EOF'
 #!/bin/bash
 set -euo pipefail
-RUN=/run/ivt; FIFO="$RUN/ctrl/control.fifo"; UNITS=/etc/ivt/units; TARGETS=/etc/ivt/targets; LOG=/var/log/ivt/journal
+RUN_DIR=/run/ivt
+FIFO="$RUN_DIR/ctrl/control.fifo"
+UNITS=/etc/ivt/units
+TARGETS=/etc/ivt/targets
+LOG=/var/log/ivt/journal
 
-send() { [[ -p "$FIFO" ]] || { echo "IVT-D not running" >&2; return 1; }; echo "$1" > "$FIFO"; }
+send_cmd() { 
+  [[ -p "$FIFO" ]] || { echo "IVT-D not running" >&2; return 1; }
+  echo "$1" > "$FIFO"
+}
 
 status_pretty() {
   printf '%-20s %-10s %-8s %-8s\n' "UNIT" "STATE" "PID" "ENABLED"
@@ -238,25 +250,36 @@ status_pretty() {
   for unit in "$UNITS"/*.service; do
     [[ -e "$unit" ]] || continue
     name=$(basename "$unit" .service)
-    state=$(cat "$RUN/state/$name" 2>/dev/null || echo "inactive")
-    pid=$(cat "$RUN/pids/$name.pid" 2>/dev/null || echo "-")
-    enabled="no"; [[ -e "$TARGETS/default.wants/$name.service" ]] && enabled="yes"
+    state=$(cat "$RUN_DIR/state/$name" 2>/dev/null || echo "inactive")
+    pid=$(cat "$RUN_DIR/pids/$name.pid" 2>/dev/null || echo "-")
+    enabled="no"
+    [[ -e "$TARGETS/default.wants/$name.service" ]] && enabled="yes"
     printf '%-20s %-10s %-8s %-8s\n' "$name" "$state" "$pid" "$enabled"
   done
 }
 
-cmd="${1:-}"; shift || true
-case "$cmd" in
-  start|stop|restart) send "$cmd:${1%.service}"; echo "$cmd request sent: ${1%.service}" ;;
-  status) status_pretty ;;
-  journal) 
-    local unit="${1%.service}" lines="${2:-50}" file
-    [[ "$unit" == "system" || -z "$unit" ]] && file="$LOG/system.log" || file="$LOG/$unit.log"
-    [[ -f "$file" ]] && tail -n "$lines" "$file" || echo "-- No entries --"
-    ;;
-  new) 
-    local unit="${1%.service}"; shift; local command="$*"
-    cat > "$UNITS/$unit.service" << EOF
+main() {
+  local cmd="${1:-}"
+  shift || true
+
+  case "$cmd" in
+    start|stop|restart) 
+      send_cmd "$cmd:${1%.service}"
+      echo "$cmd request sent: ${1%.service}" 
+      ;;
+    status) 
+      status_pretty 
+      ;;
+    journal) 
+      local unit="${1%.service}" lines="${2:-50}" file
+      [[ "$unit" == "system" || -z "$unit" ]] && file="$LOG/system.log" || file="$LOG/$unit.log"
+      [[ -f "$file" ]] && tail -n "$lines" "$file" || echo "-- No entries --"
+      ;;
+    new) 
+      local unit="${1%.service}"
+      shift
+      local command="$*"
+      cat > "$UNITS/$unit.service" << EOF
 [Unit]
 Description=Invented service: $unit
 [Service]
@@ -266,34 +289,45 @@ RestartSec=2
 [Install]
 Target=default
 EOF
-    ln -sf "$UNITS/$unit.service" "$TARGETS/default.wants/$unit.service"
-    send "start:$unit"; echo "created and started: $unit"
-    ;;
-  remove) 
-    local unit="${1%.service}"
-    send "stop:$unit" 2>/dev/null || true
-    rm -f "$TARGETS/default.wants/$unit.service" "$UNITS/$unit.service" "$RUN/state/$unit" "$RUN/pids/$unit.pid" "$RUN/manual/$unit"
-    echo "removed $unit"
-    ;;
-  sys) 
-    echo "== IVT-OS MASTER =="
-    . /etc/os-release 2>/dev/null || true
-    echo "${PRETTY_NAME:-Ubuntu}"
-    echo "Kernel: $(uname -r)"
-    echo "Uptime: $(( $(cut -d. -f1 /proc/uptime) / 60 )) min"
-    free -m 2>/dev/null || true
-    df -h / 2>/dev/null || true
-    ;;
-  shell) exec /bin/bash ;;
-  shutdown) send "shutdown"; echo "shutdown request sent" ;;
-  *) echo "Usage: ivtctl {start|stop|restart|status|journal|new|remove|sys|shell|shutdown}" ;;
-esac
+      ln -sf "$UNITS/$unit.service" "$TARGETS/default.wants/$unit.service"
+      send_cmd "start:$unit"
+      echo "created and started: $unit"
+      ;;
+    remove) 
+      local unit="${1%.service}"
+      send_cmd "stop:$unit" 2>/dev/null || true
+      rm -f "$TARGETS/default.wants/$unit.service" "$UNITS/$unit.service" "$RUN_DIR/state/$unit" "$RUN_DIR/pids/$unit.pid" "$RUN_DIR/manual/$unit"
+      echo "removed $unit"
+      ;;
+    sys) 
+      echo "== IVT-OS MASTER =="
+      . /etc/os-release 2>/dev/null || true
+      echo "${PRETTY_NAME:-Ubuntu}"
+      echo "Kernel: $(uname -r)"
+      echo "Uptime: $(( $(cut -d. -f1 /proc/uptime) / 60 )) min"
+      free -m 2>/dev/null || true
+      df -h / 2>/dev/null || true
+      ;;
+    shell) 
+      exec /bin/bash 
+      ;;
+    shutdown) 
+      send_cmd "shutdown"
+      echo "shutdown request sent" 
+      ;;
+    *) 
+      echo "Usage: ivtctl {start|stop|restart|status|journal|new|remove|sys|shell|shutdown}" 
+      ;;
+  esac
+}
+
+main "$@"
 CTL_EOF
 
 RUN cat > /usr/local/bin/systemctl << 'SYSCTL_EOF'
 #!/bin/bash
 set -euo pipefail
-RUN=/run/ivt
+RUN_DIR=/run/ivt
 UNITS=/etc/ivt/units
 TARGETS=/etc/ivt/targets
 LOG=/var/log/ivt/journal
@@ -309,107 +343,115 @@ ensure_unit() {
   fi
 }
 
-cmd="${1:-}"; shift || true
+main() {
+  local cmd="${1:-}"
+  shift || true
 
-case "$cmd" in
-  daemon-reload)
-    local f
-    for f in /etc/systemd/system/*.service; do
-      [[ -e "$f" ]] || continue
-      cp "$f" "$UNITS/"
-    done
-    echo "IVT-D: daemon-reload simulated (units synced)"
-    ;;
-  enable)
-    local unit="${1%.service}"
-    ensure_unit "$unit"
-    mkdir -p "$TARGETS/default.wants"
-    ln -sf "$UNITS/$unit.service" "$TARGETS/default.wants/$unit.service"
-    echo "Created symlink"
-    ;;
-  disable)
-    local unit="${1%.service}"
-    rm -f "$TARGETS/default.wants/$unit.service"
-    echo "Removed symlink"
-    ;;
-  is-active)
-    local unit="${1%.service}"
-    ensure_unit "$unit"
-    if pgrep -f "$unit" > /dev/null 2>&1; then
-      echo "active"
-      exit 0
-    fi
-    echo "inactive"
-    exit 3
-    ;;
-  show)
-    local unit="${1%.service}"
-    ensure_unit "$unit"
-    if pgrep -f "$unit" > /dev/null 2>&1; then
-      echo "SubState=running"
-      exit 0
-    fi
-    echo "SubState=dead"
-    exit 0
-    ;;
-  start|stop|restart)
-    local unit="${1%.service}"
-    ensure_unit "$unit"
-    $IVTCTL "$cmd" "$unit"
-    ;;
-  status)
-    if [[ -n "${1:-}" ]]; then
-      local unit="${1%.service}" state pid
-      ensure_unit "$unit"
-      state=$(cat "$RUN/state/$unit" 2>/dev/null || echo "inactive")
-      pid=$(cat "$RUN/pids/$unit.pid" 2>/dev/null || echo "-")
-      echo "● $unit.service"
-      echo "   Active: $state (Main PID: $pid)"
-      if [[ -f "$LOG/$unit.log" ]]; then
-        echo "   Logs (last 10 lines):"
-        tail -n 10 "$LOG/$unit.log" | sed 's/^/     /'
-      fi
-    else
-      printf '%-20s %-10s %-8s %-8s\n' "UNIT" "STATE" "PID" "ENABLED"
-      local unit_file unit_name state pid enabled
-      declare -A seen=()
-      for unit_file in "$UNITS"/*.service /etc/systemd/system/*.service; do
-        [[ -e "$unit_file" ]] || continue
-        unit_name=$(basename "$unit_file" .service)
-        [[ -n "${seen[$unit_name]:-}" ]] && continue
-        seen[$unit_name]=1
-        state=$(cat "$RUN/state/$unit_name" 2>/dev/null || echo "inactive")
-        pid=$(cat "$RUN/pids/$unit_name.pid" 2>/dev/null || echo "-")
-        enabled="no"
-        [[ -e "$TARGETS/default.wants/$unit_name.service" ]] && enabled="yes"
-        printf '%-20s %-10s %-8s %-8s\n' "$unit_name" "$state" "$pid" "$enabled"
+  case "$cmd" in
+    daemon-reload)
+      local f
+      for f in /etc/systemd/system/*.service; do
+        [[ -e "$f" ]] || continue
+        cp "$f" "$UNITS/"
       done
-    fi 
-    ;;
-  *)
-    $IVTCTL "$cmd" "$@"
-    ;;
-esac
+      echo "IVT-D: daemon-reload simulated (units synced)"
+      ;;
+    enable)
+      local unit="${1%.service}"
+      ensure_unit "$unit"
+      mkdir -p "$TARGETS/default.wants"
+      ln -sf "$UNITS/$unit.service" "$TARGETS/default.wants/$unit.service"
+      echo "Created symlink"
+      ;;
+    disable)
+      local unit="${1%.service}"
+      rm -f "$TARGETS/default.wants/$unit.service"
+      echo "Removed symlink"
+      ;;
+    is-active)
+      local unit="${1%.service}"
+      ensure_unit "$unit"
+      if pgrep -f "$unit" > /dev/null 2>&1; then
+        echo "active"
+        exit 0
+      fi
+      echo "inactive"
+      exit 3
+      ;;
+    show)
+      local unit="${1%.service}"
+      ensure_unit "$unit"
+      if pgrep -f "$unit" > /dev/null 2>&1; then
+        echo "SubState=running"
+        exit 0
+      fi
+      echo "SubState=dead"
+      exit 0
+      ;;
+    start|stop|restart)
+      local unit="${1%.service}"
+      ensure_unit "$unit"
+      $IVTCTL "$cmd" "$unit"
+      ;;
+    status)
+      if [[ -n "${1:-}" ]]; then
+        local unit="${1%.service}" state pid
+        ensure_unit "$unit"
+        state=$(cat "$RUN_DIR/state/$unit" 2>/dev/null || echo "inactive")
+        pid=$(cat "$RUN_DIR/pids/$unit.pid" 2>/dev/null || echo "-")
+        echo "● $unit.service"
+        echo "   Active: $state (Main PID: $pid)"
+        if [[ -f "$LOG/$unit.log" ]]; then
+          echo "   Logs (last 10 lines):"
+          tail -n 10 "$LOG/$unit.log" | sed 's/^/     /'
+        fi
+      else
+        printf '%-20s %-10s %-8s %-8s\n' "UNIT" "STATE" "PID" "ENABLED"
+        local unit_file unit_name state pid enabled
+        declare -A seen=()
+        for unit_file in "$UNITS"/*.service /etc/systemd/system/*.service; do
+          [[ -e "$unit_file" ]] || continue
+          unit_name=$(basename "$unit_file" .service)
+          [[ -n "${seen[$unit_name]:-}" ]] && continue
+          seen[$unit_name]=1
+          state=$(cat "$RUN_DIR/state/$unit_name" 2>/dev/null || echo "inactive")
+          pid=$(cat "$RUN_DIR/pids/$unit_name.pid" 2>/dev/null || echo "-")
+          enabled="no"
+          [[ -e "$TARGETS/default.wants/$unit_name.service" ]] && enabled="yes"
+          printf '%-20s %-10s %-8s %-8s\n' "$unit_name" "$state" "$pid" "$enabled"
+        done
+      fi 
+      ;;
+    *)
+      $IVTCTL "$cmd" "$@"
+      ;;
+  esac
+}
+
+main "$@"
 SYSCTL_EOF
 
-# ==============================================================================
-# 7. UNIVERSAL COMPATIBILITY WRAPPERS
-# ==============================================================================
 RUN cat > /usr/local/bin/journalctl << 'JCTL_EOF'
 #!/bin/bash
 set -euo pipefail
-LOG=/var/log/ivt/journal; unit=""; lines=50; follow=false
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -u|--unit) shift; unit="${1:-}";; --unit=*) unit="${1#--unit=}";;
-    -n|--lines) shift; lines="${1:-50}";; --lines=*) lines="${1#--lines=}";;
-    -f|--follow) follow=true;;
-  esac; shift || true
-done
-unit="${unit%.service}"
-file="$LOG/${unit:-system}.log"
-[[ ! -f "$file" ]] && { echo "-- No entries --"; exit 0; }
-$follow && exec tail -f "$file" || exec tail -n "$lines" "$file"
+LOG=/var/log/ivt/journal
+
+main() {
+  local unit="" lines=50 follow=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -u|--unit) shift; unit="${1:-}";; --unit=*) unit="${1#--unit=}";;
+      -n|--lines) shift; lines="${1:-50}";; --lines=*) lines="${1#--lines=}";;
+      -f|--follow) follow=true;;
+    esac; shift || true
+  done
+  unit="${unit%.service}"
+  local file="$LOG/${unit:-system}.log"
+  [[ ! -f "$file" ]] && { echo "-- No entries --"; exit 0; }
+  $follow && exec tail -f "$file" || exec tail -n "$lines" "$file"
+}
+
+main "$@"
 JCTL_EOF
 
 RUN cat > /usr/local/bin/service << 'SVC_EOF'
@@ -422,16 +464,19 @@ SVC_EOF
 RUN cat > /usr/local/bin/hostnamectl << 'HCTL_EOF'
 #!/bin/bash
 set -euo pipefail
-cmd="${1:-status}"
-case "$cmd" in
-  status) echo " Static hostname: $(cat /etc/hostname 2>/dev/null || echo ivt-master)"; echo "  Operating System: $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-Ubuntu}")"; echo "          Kernel: $(uname -r)";;
-  set-hostname) echo "${2:-ivt-master}" > /etc/hostname 2>/dev/null || true;;
-  hostname) cat /etc/hostname 2>/dev/null || echo ivt-master;;
-esac
+main() {
+  local cmd="${1:-status}"
+  case "$cmd" in
+    status) echo " Static hostname: $(cat /etc/hostname 2>/dev/null || echo ivt-master)"; echo "  Operating System: $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-Ubuntu}")"; echo "          Kernel: $(uname -r)";;
+    set-hostname) echo "${2:-ivt-master}" > /etc/hostname 2>/dev/null || true;;
+    hostname) cat /etc/hostname 2>/dev/null || echo ivt-master;;
+  esac
+}
+main "$@"
 HCTL_EOF
 
 # ==============================================================================
-# 8. CORE SERVICES & AGENTS
+# 7. CORE SERVICES & AGENTS
 # ==============================================================================
 RUN cat > /ivt/os/api.py << 'API_EOF'
 #!/usr/bin/env python3
@@ -520,7 +565,7 @@ if __name__ == "__main__":
 LINK_EOF
 
 # ==============================================================================
-# 9. SERVICE DEFINITIONS & PERMISSIONS
+# 8. SERVICE DEFINITIONS & PERMISSIONS
 # ==============================================================================
 RUN cat > /etc/ivt/units/ivt-api.service << 'UNIT1_EOF'
 [Unit]
