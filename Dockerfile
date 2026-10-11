@@ -16,7 +16,7 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* /var/cache/apt/*
 
-# Force genuine Ubuntu 24.04 LTS identity so all installers work perfectly
+# Force genuine Ubuntu 24.04 LTS identity so ALL installers work perfectly
 RUN printf 'PRETTY_NAME="Ubuntu 24.04.1 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\nVERSION="24.04.1 LTS (Noble Numbat)"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL="https://www.ubuntu.com/"\nSUPPORT_URL="https://help.ubuntu.com/"\nBUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"\nPRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n' > /etc/os-release
 
 # Create directory structure
@@ -25,7 +25,7 @@ RUN mkdir -p \
       /run/ivt/ctrl /run/ivt/pids /run/ivt/state /run/ivt/manual /run/ivt/link \
       /var/log/ivt/journal /etc/systemd /lib/systemd /run/systemd
 
-# Create IVT-D init system (PID 1)
+# Create IVT-D init system (PID 1) - NOW SUPPORTS WorkingDirectory
 RUN cat > /ivt/os/init << 'INITEOF'
 #!/bin/bash
 set -u
@@ -67,6 +67,7 @@ service_start() {
   rm -f "$RUN/manual/$name"
   
   local execstart=$(get_value $unitfile Service ExecStart)
+  local workdir=$(get_value $unitfile Service WorkingDirectory)
   local restart=$(get_value $unitfile Service Restart)
   local restartsec=$(get_value $unitfile Service RestartSec)
   
@@ -76,9 +77,16 @@ service_start() {
   [[ -z $execstart ]] && { echo failed > $RUN/state/$name; return 1; }
   
   echo starting > $RUN/state/$name
-  /bin/sh -c "$execstart" >> $LOG/$name.log 2>&1 &
-  local pid=$!
   
+  # Execute with WorkingDirectory support
+  (
+    if [[ -n $workdir ]]; then
+      cd "$workdir" || exit 1
+    fi
+    exec /bin/sh -c "$execstart" >> "$LOG/$name.log" 2>&1
+  ) &
+  
+  local pid=$!
   echo $pid > $pidfile
   echo running > $RUN/state/$name
   PIDS[$pid]=$name
@@ -194,7 +202,7 @@ EOF
 esac
 CTL_EOF
 
-# Create systemctl compatibility (Intercepts calls but OS remains genuine Ubuntu)
+# Create systemctl compatibility
 RUN cat > /usr/local/bin/systemctl << 'SYSCTL_EOF'
 #!/bin/bash
 set -u
