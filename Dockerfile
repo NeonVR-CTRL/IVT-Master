@@ -201,7 +201,7 @@ EOF
 esac
 CTL_EOF
 
-# Create UNIVERSAL systemctl compatibility (NOW INCLUDES is-active for x-ui menu)
+# Create UNIVERSAL systemctl compatibility (NOW WITH BULLETPROOF pgrep FALLBACK)
 RUN cat > /usr/local/bin/systemctl << 'SYSCTL_EOF'
 #!/bin/bash
 set -u
@@ -246,6 +246,8 @@ case $cmd in
   is-active)
     unit="${1%.service}"
     ensure_unit "$unit"
+    
+    # 1. Check internal PID tracking
     state=$(cat $RUN/state/$unit 2>/dev/null || echo inactive)
     if [[ "$state" == "running" ]]; then
       pid=$(cat $RUN/pids/$unit.pid 2>/dev/null || echo "")
@@ -254,6 +256,19 @@ case $cmd in
         exit 0
       fi
     fi
+    
+    # 2. BULLETPROOF FALLBACK: Check if the actual binary is running via pgrep
+    # This guarantees detection even if shell-wrapping detaches the PID
+    execstart=$(get_value "/etc/ivt/units/$unit.service" Service ExecStart)
+    if [[ -n "$execstart" ]]; then
+      cmd=$(echo "$execstart" | awk '{print $1}')
+      proc_name=$(basename "$cmd")
+      if pgrep -x "$proc_name" > /dev/null 2>&1; then
+        echo "active"
+        exit 0
+      fi
+    fi
+    
     echo "inactive"
     exit 3
     ;;
