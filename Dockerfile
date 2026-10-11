@@ -201,7 +201,7 @@ EOF
 esac
 CTL_EOF
 
-# Create UNIVERSAL systemctl compatibility (NOW INCLUDES 'show' FOR x-ui COMPATIBILITY)
+# Create UNIVERSAL systemctl compatibility (FIXED: get_value is now defined locally)
 RUN cat > /usr/local/bin/systemctl << 'SYSCTL_EOF'
 #!/bin/bash
 set -u
@@ -210,6 +210,11 @@ UNITS=/etc/ivt/units
 TARGETS=/etc/ivt/targets
 LOG=/var/log/ivt/journal
 IVTCTL=/usr/local/bin/ivtctl
+
+# Define get_value locally so it works in this script
+get_value() {
+  mawk -v section="$2" -v key="$3" 'BEGIN{c=""} /^\[/{c=$0;gsub(/[\[\] \t\r]/,"",c);next} c==section{p=index($0,"=");if(p>0){k=substr($0,1,p-1);gsub(/[ \t\r]/,"",k);if(k==key){v=substr($0,p+1);sub(/\r$/,"",v);print v;exit}}}' "$1" 2>/dev/null
+}
 
 ensure_unit() {
   local unit="${1%.service}.service"
@@ -256,8 +261,8 @@ case $cmd in
     fi
     execstart=$(get_value "/etc/ivt/units/$unit.service" Service ExecStart)
     if [[ -n "$execstart" ]]; then
-      cmd=$(echo "$execstart" | awk '{print $1}')
-      proc_name=$(basename "$cmd")
+      cmd_name=$(echo "$execstart" | awk '{print $1}')
+      proc_name=$(basename "$cmd_name")
       if pgrep -x "$proc_name" > /dev/null 2>&1; then
         echo "active"
         exit 0
@@ -267,9 +272,21 @@ case $cmd in
     exit 3
     ;;
   show)
-    # THIS IS THE FIX: x-ui.sh uses 'systemctl show --property=SubState x-ui'
     unit="${1%.service}"
     ensure_unit "$unit"
+    
+    # Check if the process is actually running using pgrep (Bulletproof)
+    execstart=$(get_value "/etc/ivt/units/$unit.service" Service ExecStart)
+    if [[ -n "$execstart" ]]; then
+      cmd_name=$(echo "$execstart" | sed -E 's/^ExecStart=//; s/^\/bin\/sh -c //; s/^exec //' | awk '{print $1}')
+      proc_name=$(basename "$cmd_name")
+      if pgrep -x "$proc_name" > /dev/null 2>&1; then
+        echo "SubState=running"
+        exit 0
+      fi
+    fi
+    
+    # Fallback: check our internal state
     state=$(cat $RUN/state/$unit 2>/dev/null || echo inactive)
     if [[ "$state" == "running" ]]; then
       pid=$(cat $RUN/pids/$unit.pid 2>/dev/null || echo "")
@@ -278,15 +295,7 @@ case $cmd in
         exit 0
       fi
     fi
-    execstart=$(get_value "/etc/ivt/units/$unit.service" Service ExecStart)
-    if [[ -n "$execstart" ]]; then
-      cmd=$(echo "$execstart" | awk '{print $1}')
-      proc_name=$(basename "$cmd")
-      if pgrep -x "$proc_name" > /dev/null 2>&1; then
-        echo "SubState=running"
-        exit 0
-      fi
-    fi
+    
     echo "SubState=dead"
     exit 0
     ;;
