@@ -6,20 +6,20 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     IVT_ROLE=master
 
-# 1. ADVANCED: Standard Docker policy-rc.d fix to prevent apt service hangs
+# 1. Standard Docker policy-rc.d fix to prevent apt service hangs
 RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d
 
-# 2. EFFICIENT: Minimal, curated dependency tree. No bloat.
+# 2. Minimal, curated dependency tree. No bloat.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       bash coreutils procps util-linux mawk ca-certificates curl sudo python3-minimal systemd-sysv && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* /var/cache/apt/*
 
-# 3. UNIVERSAL: 100% Genuine Ubuntu 24.04 LTS identity. All installers will accept this.
+# 3. 100% Genuine Ubuntu 24.04 LTS identity. All installers will accept this.
 RUN printf 'PRETTY_NAME="Ubuntu 24.04.1 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\nVERSION="24.04.1 LTS (Noble Numbat)"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL="https://www.ubuntu.com/"\nSUPPORT_URL="https://help.ubuntu.com/"\nBUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"\nPRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n' > /etc/os-release
 
-# 4. SMART: Organized, purpose-built directory structure
+# 4. Organized, purpose-built directory structure
 RUN mkdir -p \
       /ivt/os \
       /etc/ivt/units /etc/ivt/targets/default.wants \
@@ -164,6 +164,7 @@ shutdown_system() {
   exit 0
 }
 
+# --- MAIN EXECUTION LOOP (NO 'local' KEYWORDS HERE) ---
 TARGET=$(cat "$TARGET_FILE" 2>/dev/null || echo "default")
 FIFO="$RUN/ctrl/control.fifo"
 rm -f "$FIFO"
@@ -194,7 +195,7 @@ while true; do
   
   for pid in "${!PIDS[@]}"; do
     if ! kill -0 "$pid" 2>/dev/null; then
-      local name="${PIDS[$pid]}"
+      name="${PIDS[$pid]}"
       unset "PIDS[$pid]" 2>/dev/null || true
       rm -f "$RUN/pids/$name.pid"
       
@@ -203,9 +204,9 @@ while true; do
         continue
       fi
       
-      local policy="${RESTART[$name]:-no:1}"
-      local restart_policy="${policy%%:*}"
-      local restart_sec="${policy##*:}"
+      policy="${RESTART[$name]:-no:1}"
+      restart_policy="${policy%%:*}"
+      restart_sec="${policy##*:}"
       
       if [[ "$restart_policy" == "always" || "$restart_policy" == "on-failure" ]]; then
         log_system "restarting $name in ${restart_sec}s"
@@ -222,7 +223,7 @@ done
 INITEOF
 
 # ==============================================================================
-# 6. SMART CONTROL TOOLS: ivtctl & systemctl (Advanced, universal compatibility)
+# 6. SMART CONTROL TOOLS: ivtctl & systemctl
 # ==============================================================================
 RUN cat > /usr/local/bin/ivtctl << 'CTL_EOF'
 #!/bin/bash
@@ -406,7 +407,7 @@ while [[ $# -gt 0 ]]; do
   esac; shift || true
 done
 unit="${unit%.service}"
-local file="$LOG/${unit:-system}.log"
+file="$LOG/${unit:-system}.log"
 [[ ! -f "$file" ]] && { echo "-- No entries --"; exit 0; }
 $follow && exec tail -f "$file" || exec tail -n "$lines" "$file"
 JCTL_EOF
