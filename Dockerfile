@@ -28,7 +28,7 @@ RUN mkdir -p \
       /etc/systemd/system /lib/systemd/system /run/systemd
 
 # ==============================================================================
-# 5. ADVANCED INIT SYSTEM (PID 1): Now fully supports Environment & EnvironmentFile
+# 5. ADVANCED INIT SYSTEM (PID 1): Fully supports Environment & EnvironmentFile
 # ==============================================================================
 RUN cat > /ivt/os/init << 'INITEOF'
 #!/bin/bash
@@ -250,93 +250,8 @@ main "$@"
 INITEOF
 
 # ==============================================================================
-# 6. SMART CONTROL TOOLS
+# 6. 100% UBUNTU COMMAND NAMES: systemctl, service, journalctl (No custom helpers)
 # ==============================================================================
-RUN cat > /usr/local/bin/ivtctl << 'CTL_EOF'
-#!/bin/bash
-set -euo pipefail
-RUN_DIR=/run/ivt
-FIFO="$RUN_DIR/ctrl/control.fifo"
-UNITS=/etc/ivt/units
-TARGETS=/etc/ivt/targets
-LOG=/var/log/ivt/journal
-
-send_cmd() { 
-  [[ -p "$FIFO" ]] || { echo "IVT-D not running" >&2; return 1; }
-  echo "$1" > "$FIFO"
-}
-
-status_pretty() {
-  printf '%-20s %-10s %-8s %-8s\n' "UNIT" "STATE" "PID" "ENABLED"
-  local unit name state pid enabled
-  for unit in "$UNITS"/*.service; do
-    [[ -e "$unit" ]] || continue
-    name=$(basename "$unit" .service)
-    state=$(cat "$RUN_DIR/state/$name" 2>/dev/null || echo "inactive")
-    pid=$(cat "$RUN_DIR/pids/$name.pid" 2>/dev/null || echo "-")
-    enabled="no"
-    [[ -e "$TARGETS/default.wants/$name.service" || -e "$TARGETS/multi-user.target.wants/$name.service" ]] && enabled="yes"
-    printf '%-20s %-10s %-8s %-8s\n' "$name" "$state" "$pid" "$enabled"
-  done
-}
-
-main() {
-  local cmd="${1:-}"
-  shift || true
-
-  case "$cmd" in
-    start|stop|restart) 
-      send_cmd "$cmd:${1%.service}"
-      echo "$cmd request sent: ${1%.service}" 
-      ;;
-    status) status_pretty ;;
-    journal) 
-      local unit="${1%.service}" lines="${2:-50}" file
-      [[ "$unit" == "system" || -z "$unit" ]] && file="$LOG/system.log" || file="$LOG/$unit.log"
-      [[ -f "$file" ]] && tail -n "$lines" "$file" || echo "-- No entries --"
-      ;;
-    new) 
-      local unit="${1%.service}"
-      shift
-      local command="$*"
-      cat > "$UNITS/$unit.service" << EOF
-[Unit]
-Description=Invented service: $unit
-[Service]
-ExecStart=$command
-Restart=always
-RestartSec=2
-[Install]
-Target=default
-EOF
-      ln -sf "$UNITS/$unit.service" "$TARGETS/default.wants/$unit.service"
-      send_cmd "start:$unit"
-      echo "created and started: $unit"
-      ;;
-    remove) 
-      local unit="${1%.service}"
-      send_cmd "stop:$unit" 2>/dev/null || true
-      rm -f "$TARGETS/default.wants/$unit.service" "$TARGETS/multi-user.target.wants/$unit.service" "$UNITS/$unit.service" "$RUN_DIR/state/$unit" "$RUN_DIR/pids/$unit.pid" "$RUN_DIR/manual/$unit"
-      echo "removed $unit"
-      ;;
-    sys) 
-      echo "== IVT-OS MASTER =="
-      . /etc/os-release 2>/dev/null || true
-      echo "${PRETTY_NAME:-Ubuntu}"
-      echo "Kernel: $(uname -r)"
-      echo "Uptime: $(( $(cut -d. -f1 /proc/uptime) / 60 )) min"
-      free -m 2>/dev/null || true
-      df -h / 2>/dev/null || true
-      ;;
-    shell) exec /bin/bash ;;
-    shutdown) send_cmd "shutdown"; echo "shutdown request sent" ;;
-    *) echo "Usage: ivtctl {start|stop|restart|status|journal|new|remove|sys|shell|shutdown}" ;;
-  esac
-}
-
-main "$@"
-CTL_EOF
-
 RUN cat > /usr/local/bin/systemctl << 'SYSCTL_EOF'
 #!/bin/bash
 set -euo pipefail
@@ -344,7 +259,24 @@ RUN_DIR=/run/ivt
 UNITS=/etc/ivt/units
 TARGETS=/etc/ivt/targets
 LOG=/var/log/ivt/journal
-IVTCTL=/usr/local/bin/ivtctl
+
+get_value() {
+  local file="$1" section="$2" key="$3"
+  mawk -v section="$section" -v key="$key" '
+    BEGIN { c="" }
+    /^\[/ { c=$0; gsub(/[\[\] \t\r]/,"",c); next }
+    c == section {
+      p = index($0,"=")
+      if (p > 0) {
+        k = substr($0,1,p-1); gsub(/[ \t\r]/,"",k)
+        if (k == key) {
+          v = substr($0,p+1); sub(/\r$/,"",v)
+          print v; exit
+        }
+      }
+    }
+  ' "$file" 2>/dev/null
+}
 
 ensure_unit() {
   local unit="${1%.service}.service"
@@ -356,26 +288,33 @@ ensure_unit() {
   fi
 }
 
+send_cmd() {
+  local fifo="$RUN_DIR/ctrl/control.fifo"
+  if [[ -p "$fifo" ]]; then
+    echo "$1" > "$fifo"
+  else
+    echo "IVT-D not running" >&2
+    return 1
+  fi
+}
+
 main() {
   local cmd="${1:-}"
   shift || true
 
   case "$cmd" in
-    daemon-reload)
-      local f
-      for f in /etc/systemd/system/*.service; do
-        [[ -e "$f" ]] || continue
-        cp "$f" "$UNITS/"
-      done
-      echo "IVT-D: daemon-reload simulated (units synced)"
+    start|stop|restart)
+      local unit="${1%.service}"
+      ensure_unit "$unit"
+      send_cmd "$cmd:$unit"
+      echo "$cmd request sent: $unit"
       ;;
     enable)
       local unit="${1%.service}"
       ensure_unit "$unit"
-      mkdir -p "$TARGETS/default.wants"
-      mkdir -p "$TARGETS/multi-user.target.wants"
-      ln -sf "$UNITS/$unit.service" "$TARGETS/default.wants/$unit.service"
-      ln -sf "$UNITS/$unit.service" "$TARGETS/multi-user.target.wants/$unit.service"
+      mkdir -p "$TARGETS/default.wants" "$TARGETS/multi-user.target.wants"
+      ln -sf "$UNITS/$unit.service" "$TARGETS/default.wants/$unit.service" 2>/dev/null || true
+      ln -sf "$UNITS/$unit.service" "$TARGETS/multi-user.target.wants/$unit.service" 2>/dev/null || true
       echo "Created symlink"
       ;;
     disable)
@@ -422,17 +361,20 @@ main() {
       fi
       echo "SubState=dead"; exit 0
       ;;
-    start|stop|restart)
-      local unit="${1%.service}"
-      ensure_unit "$unit"
-      $IVTCTL "$cmd" "$unit"
+    daemon-reload)
+      local f
+      for f in /etc/systemd/system/*.service; do
+        [[ -e "$f" ]] || continue
+        cp "$f" "$UNITS/"
+      done
+      echo "IVT-D: daemon-reload simulated (units synced)"
       ;;
     status)
       if [[ -n "${1:-}" ]]; then
-        local unit="${1%.service}" state pid
+        local unit="${1%.service}"
         ensure_unit "$unit"
-        state=$(cat "$RUN_DIR/state/$unit" 2>/dev/null || echo "inactive")
-        pid=$(cat "$RUN_DIR/pids/$unit.pid" 2>/dev/null || echo "-")
+        local state=$(cat "$RUN_DIR/state/$unit" 2>/dev/null || echo "inactive")
+        local pid=$(cat "$RUN_DIR/pids/$unit.pid" 2>/dev/null || echo "-")
         echo "● $unit.service"
         echo "   Active: $state (Main PID: $pid)"
         if [[ -f "$LOG/$unit.log" ]]; then
@@ -454,10 +396,15 @@ main() {
           [[ -e "$TARGETS/default.wants/$unit_name.service" || -e "$TARGETS/multi-user.target.wants/$unit_name.service" ]] && enabled="yes"
           printf '%-20s %-10s %-8s %-8s\n' "$unit_name" "$state" "$pid" "$enabled"
         done
-      fi 
+      fi
+      ;;
+    --version)
+      echo "systemd 255 (Ubuntu 24.04)"
+      exit 0
       ;;
     *)
-      $IVTCTL "$cmd" "$@"
+      # Gracefully ignore unknown flags to prevent breaking apt/invoke-rc.d
+      exit 0
       ;;
   esac
 }
@@ -465,35 +412,43 @@ main() {
 main "$@"
 SYSCTL_EOF
 
+RUN cat > /usr/local/bin/service << 'SVC_EOF'
+#!/bin/bash
+set -euo pipefail
+if [[ $# -lt 2 ]]; then
+  echo "Usage: service <unit> {start|stop|restart|status}" >&2
+  exit 1
+fi
+exec /usr/local/bin/systemctl "$2" "${1%.service}"
+SVC_EOF
+
 RUN cat > /usr/local/bin/journalctl << 'JCTL_EOF'
 #!/bin/bash
 set -euo pipefail
 LOG=/var/log/ivt/journal
-
-main() {
-  local unit="" lines=50 follow=false
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -u|--unit) shift; unit="${1:-}";; --unit=*) unit="${1#--unit=}";;
-      -n|--lines) shift; lines="${1:-50}";; --lines=*) lines="${1#--lines=}";;
-      -f|--follow) follow=true;;
-    esac; shift || true
-  done
-  unit="${unit%.service}"
-  local file="$LOG/${unit:-system}.log"
-  [[ ! -f "$file" ]] && { echo "-- No entries --"; exit 0; }
-  $follow && exec tail -f "$file" || exec tail -n "$lines" "$file"
-}
-
-main "$@"
+unit=""
+lines=50
+follow=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -u|--unit) shift; unit="${1:-}";; --unit=*) unit="${1#--unit=}";;
+    -n|--lines) shift; lines="${1:-50}";; --lines=*) lines="${1#--lines=}";;
+    -f|--follow) follow=true;;
+    *) shift;; # Gracefully ignore other flags
+  esac
+done
+unit="${unit%.service}"
+file="$LOG/${unit:-system}.log"
+if [[ ! -f "$file" ]]; then
+  echo "-- No entries --"
+  exit 0
+fi
+if $follow; then
+  exec tail -f "$file"
+else
+  exec tail -n "$lines" "$file"
+fi
 JCTL_EOF
-
-RUN cat > /usr/local/bin/service << 'SVC_EOF'
-#!/bin/bash
-set -euo pipefail
-[[ $# -lt 2 ]] && { echo "Usage: service <unit> {start|stop|restart|status}" >&2; exit 1; }
-exec /usr/local/bin/ivtctl "$2" "$1"
-SVC_EOF
 
 RUN cat > /usr/local/bin/hostnamectl << 'HCTL_EOF'
 #!/bin/bash
@@ -538,10 +493,10 @@ class IVTHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self.send(200, "OK"); return
         if self.path == "/api/status":
-            self.send(200, run(["ivtctl", "status"])); return
+            self.send(200, run(["systemctl", "status"])); return
         if self.path == "/api/sys":
-            self.send(200, run(["ivtctl", "sys"])); return
-        status = run(["ivtctl", "status"])
+            self.send(200, run(["hostnamectl", "status"])); return
+        status = run(["systemctl", "status"])
         kernel = run(["uname", "-a"])
         page = f"""<html><head><title>IVT-OS MASTER</title></head><body>
 <h1>IVT-OS MASTER</h1><p>{html.escape(kernel)}</p>
@@ -634,8 +589,7 @@ RestartSec=1
 Target=default
 UNIT3_EOF
 
-RUN chmod +x /ivt/os/init /usr/local/bin/ivtctl /usr/local/bin/systemctl \
-      /usr/local/bin/journalctl /usr/local/bin/service /usr/local/bin/hostnamectl && \
+RUN chmod +x /ivt/os/init /usr/local/bin/systemctl /usr/local/bin/service /usr/local/bin/journalctl /usr/local/bin/hostnamectl && \
     echo 'ivt-master' > /etc/hostname && \
     echo "default" > /etc/ivt/default.target && \
     ln -sf /etc/ivt/units/ivt-api.service /etc/ivt/targets/default.wants/ && \
