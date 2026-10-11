@@ -6,12 +6,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     IVT_ROLE=master
 
+# Prevent apt from trying to start services during installation (Standard Docker Fix)
+RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d
+
 # Install minimal dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      bash coreutils procps util-linux mawk ca-certificates curl sudo python3-minimal && \
+      bash coreutils procps util-linux mawk ca-certificates curl sudo python3-minimal systemd-sysv && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* /var/cache/apt/*
+
+# Force genuine Ubuntu 24.04 LTS identity so all installers work perfectly
+RUN printf 'PRETTY_NAME="Ubuntu 24.04.1 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\nVERSION="24.04.1 LTS (Noble Numbat)"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL="https://www.ubuntu.com/"\nSUPPORT_URL="https://help.ubuntu.com/"\nBUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"\nPRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n' > /etc/os-release
 
 # Create directory structure
 RUN mkdir -p \
@@ -19,7 +25,7 @@ RUN mkdir -p \
       /run/ivt/ctrl /run/ivt/pids /run/ivt/state /run/ivt/manual /run/ivt/link \
       /var/log/ivt/journal /etc/systemd /lib/systemd /run/systemd
 
-# Create IVT-D init system (PID 1) - FIXED
+# Create IVT-D init system (PID 1)
 RUN cat > /ivt/os/init << 'INITEOF'
 #!/bin/bash
 set -u
@@ -181,14 +187,14 @@ Target=default
 EOF
   ln -sf $UNITS/$unit.service $TARGETS/default.wants/$unit.service; send "start:$unit"; echo "created and started: $unit" ;;
   remove) unit="${1%.service}"; send "stop:$unit" 2>/dev/null || true; rm -f $TARGETS/default.wants/$unit.service $UNITS/$unit.service $RUN/state/$unit $RUN/pids/$unit.pid $RUN/manual/$unit; echo "removed $unit" ;;
-  sys) echo "== IVT-OS MASTER =="; . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-IVT-OS}"; echo "Kernel: $(uname -r)"; echo "Uptime: $(( $(cut -d. -f1 /proc/uptime) / 60 )) min"; free -m 2>/dev/null; df -h / 2>/dev/null ;;
+  sys) echo "== IVT-OS MASTER =="; . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Ubuntu}"; echo "Kernel: $(uname -r)"; echo "Uptime: $(( $(cut -d. -f1 /proc/uptime) / 60 )) min"; free -m 2>/dev/null; df -h / 2>/dev/null ;;
   shell) exec /bin/bash ;;
   shutdown) send shutdown; echo "shutdown request sent" ;;
   *) echo "Usage: ivtctl {start|stop|restart|status|journal|new|remove|sys|shell|shutdown}" ;;
 esac
 CTL_EOF
 
-# Create systemctl compatibility (FIXED to handle unit names properly)
+# Create systemctl compatibility (Intercepts calls but OS remains genuine Ubuntu)
 RUN cat > /usr/local/bin/systemctl << 'SYSCTL_EOF'
 #!/bin/bash
 set -u
@@ -259,7 +265,7 @@ RUN cat > /usr/local/bin/hostnamectl << 'HCTL_EOF'
 #!/bin/bash
 cmd="${1:-status}"
 case "$cmd" in
-  status) echo " Static hostname: $(cat /etc/hostname 2>/dev/null || echo ivt-master)"; echo "  Operating System: $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-IVT-OS}")"; echo "          Kernel: $(uname -r)";;
+  status) echo " Static hostname: $(cat /etc/hostname 2>/dev/null || echo ivt-master)"; echo "  Operating System: $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-Ubuntu}")"; echo "          Kernel: $(uname -r)";;
   set-hostname) echo "${2:-ivt-master}" > /etc/hostname 2>/dev/null || true;;
   hostname) cat /etc/hostname 2>/dev/null || echo ivt-master;;
 esac
@@ -400,7 +406,6 @@ UNIT3_EOF
 # Set permissions and OS identity
 RUN chmod +x /ivt/os/init /usr/local/bin/ivtctl /usr/local/bin/systemctl \
       /usr/local/bin/journalctl /usr/local/bin/service /usr/local/bin/hostnamectl && \
-    printf 'PRETTY_NAME="IVT-OS MASTER 24.04 LTS"\nNAME="IVT-OS"\nVERSION_ID="24.04"\nID=ivtos\n' > /etc/os-release && \
     echo 'ivt-master' > /etc/hostname && \
     echo default > /etc/ivt/default.target && \
     ln -sf /etc/ivt/units/ivt-api.service /etc/ivt/targets/default.wants/ && \
