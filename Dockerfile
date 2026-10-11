@@ -6,17 +6,21 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     IVT_ROLE=master
 
+# Docker marker + policy-rc.d
 RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d && \
     touch /.dockerenv
 
+# Minimal dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       bash coreutils procps util-linux mawk ca-certificates curl sudo python3-minimal systemd-sysv && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* /var/cache/apt/*
 
+# Ubuntu identity
 RUN printf 'PRETTY_NAME="Ubuntu 24.04.1 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\nVERSION="24.04.1 LTS (Noble Numbat)"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL="https://www.ubuntu.com/"\nSUPPORT_URL="https://help.ubuntu.com/"\nBUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"\nPRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n' > /etc/os-release
 
+# Directory structure
 RUN mkdir -p \
       /ivt/os \
       /etc/ivt/units /etc/ivt/targets/default.wants /etc/ivt/targets/multi-user.target.wants \
@@ -24,6 +28,7 @@ RUN mkdir -p \
       /var/log/ivt/journal \
       /etc/systemd/system /lib/systemd/system /run/systemd
 
+# INIT SYSTEM
 RUN cat > /ivt/os/init << 'INITEOF'
 #!/bin/bash
 set -euo pipefail
@@ -33,17 +38,13 @@ UNITS=/etc/ivt/units
 TARGETS=/etc/ivt/targets
 LOG=/var/log/ivt/journal
 TARGET_FILE=/etc/ivt/default.target
-
 mkdir -p "$RUN_DIR"/{ctrl,pids,state,manual,link} "$LOG"
 [[ ! -f /etc/machine-id ]] && cat /proc/sys/kernel/random/uuid > /etc/machine-id
 cat /proc/sys/kernel/random/uuid > "$RUN_DIR/boot-id"
 date +%s > "$RUN_DIR/boottime"
-
 declare -A PIDS=()
 declare -A RESTART=()
-
 log_system() { echo "$(date -Is) $*" >> "$LOG/system.log"; }
-
 get_value() {
   local file="$1" section="$2" key="$3"
   mawk -v section="$section" -v key="$key" '
@@ -58,14 +59,12 @@ get_value() {
     }
   ' "$file" 2>/dev/null
 }
-
 kill_tree() {
   local pid="$1" sig="${2:-TERM}"
   local children; children=$(pgrep -P "$pid" 2>/dev/null || true)
   local child; for child in $children; do kill_tree "$child" "$sig"; done
   kill -"$sig" "$pid" 2>/dev/null || true
 }
-
 service_start() {
   local unitfile="$1"
   local name; name=$(basename "$1" .service)
@@ -106,7 +105,6 @@ service_start() {
   RESTART[$name]="$restart:$restartsec"
   log_system "started $name pid=$pid"
 }
-
 service_stop() {
   local name="$1"; local pidfile="$RUN_DIR/pids/$name.pid"
   touch "$RUN_DIR/manual/$name"
@@ -123,7 +121,6 @@ service_stop() {
   echo "stopped" > "$RUN_DIR/state/$name"
   log_system "stopped $name"
 }
-
 shutdown_system() {
   log_system "shutdown requested"
   local pid
@@ -132,7 +129,6 @@ shutdown_system() {
   for pid in "${!PIDS[@]}"; do kill_tree "$pid" KILL; done
   exit 0
 }
-
 main() {
   local target cmd name policy restart_policy restart_sec
   target=$(cat "$TARGET_FILE" 2>/dev/null || echo "default")
@@ -172,9 +168,7 @@ main() {
 main "$@"
 INITEOF
 
-# ==============================================================================
-# 6. systemctl — BULLETPROOF STATUS FORMAT (matches exactly what x-ui.sh parses)
-# ==============================================================================
+# systemctl - FIXED STATUS FORMAT
 RUN cat > /usr/local/bin/systemctl << 'SYSCTL_EOF'
 #!/bin/bash
 set -euo pipefail
@@ -183,33 +177,22 @@ UNITS=/etc/ivt/units
 TARGETS=/etc/ivt/targets
 LOG=/var/log/ivt/journal
 
-# Bulletproof running check — covers every detection method
 is_running() {
   local name="$1"
-  # Method A: state file + PID alive
   local state; state=$(cat "$RUN_DIR/state/$name" 2>/dev/null || echo "inactive")
   if [[ "$state" == "running" ]]; then
     local pid; pid=$(cat "$RUN_DIR/pids/$name.pid" 2>/dev/null || echo "")
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then return 0; fi
   fi
-  # Method B: ps -ef scan for the binary path (most reliable)
-  if ps -eo pid,args 2>/dev/null | grep -v grep | grep -qE "(^| )/(usr|etc|opt)/[^ ]*/$name( |$)"; then
-    return 0
-  fi
-  # Method C: pgrep on common install paths
+  if ps -eo pid,args 2>/dev/null | grep -v grep | grep -qE "/usr/local/$name/$name|/usr/local/x-ui/$name"; then return 0; fi
   if pgrep -f "/usr/local/$name/$name" > /dev/null 2>&1; then return 0; fi
-  if pgrep -f "/usr/local/x-ui/$name" > /dev/null 2>&1; then return 0; fi
   return 1
 }
 
-# Skip flags, return the unit name
 find_unit_arg() {
   local arg
   for arg in "$@"; do
-    case "$arg" in
-      -*) continue ;;
-      *) echo "${arg%.service}"; return ;;
-    esac
+    case "$arg" in -*) continue ;; *) echo "${arg%.service}"; return ;; esac
   done
   echo ""
 }
@@ -231,7 +214,6 @@ send_cmd() {
 
 main() {
   local cmd="${1:-}"; shift || true
-
   case "$cmd" in
     start|stop|restart)
       local unit; unit=$(find_unit_arg "$@"); ensure_unit "$unit"
@@ -260,16 +242,10 @@ main() {
         echo "enabled"; exit 0
       else echo "disabled"; exit 1; fi
       ;;
-    is-failed)
-      echo "inactive"; exit 1
-      ;;
     show)
       local unit; unit=$(find_unit_arg "$@"); ensure_unit "$unit"
-      local prop="SubState"
-      local a
-      for a in "$@"; do
-        case "$a" in --property=*) prop="${a#--property=}" ;; esac
-      done
+      local prop="SubState" a
+      for a in "$@"; do case "$a" in --property=*) prop="${a#--property=}" ;; esac; done
       if is_running "$unit"; then echo "${prop}=running"; exit 0; fi
       echo "${prop}=dead"; exit 0
       ;;
@@ -279,29 +255,24 @@ main() {
       echo "IVT-D: daemon-reload simulated (units synced)"
       ;;
     status)
-      # SPECIFIC UNIT — must output the exact systemd format x-ui.sh parses:
-      #   temp=$(systemctl status x-ui | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)
-      # The Active line must be:  "     Active: active (running)"
       if [[ -n "${1:-}" && "${1}" != -* ]]; then
-        local unit="${1%.service}"
-        ensure_unit "$unit"
+        local unit="${1%.service}"; ensure_unit "$unit"
         if is_running "$unit"; then
-          echo "● $unit.service - $(grep -m1 "^Description=" "$UNITS/$unit.service" 2>/dev/null | cut -d= -f2- || echo "$unit")"
-          echo "     Loaded: loaded (/etc/ivt/units/$unit.service; enabled; vendor preset: enabled)"
+          echo "● $unit.service"
+          echo "     Loaded: loaded (/etc/ivt/units/$unit.service; enabled)"
           echo "     Active: active (running)"
           local pid; pid=$(cat "$RUN_DIR/pids/$unit.pid" 2>/dev/null || echo "-")
           echo "   Main PID: $pid"
           if [[ -f "$LOG/$unit.log" ]]; then
-            echo "     Logs (last 5):"
+            echo "     Logs:"
             tail -n 5 "$LOG/$unit.log" | sed 's/^/     /'
           fi
         else
-          echo "● $unit.service - $unit"
+          echo "● $unit.service"
           echo "     Loaded: loaded (/etc/ivt/units/$unit.service; enabled)"
           echo "     Active: inactive (dead)"
         fi
       else
-        # LIST ALL
         printf '%-20s %-10s %-8s %-8s\n' "UNIT" "STATE" "PID" "ENABLED"
         local unit_file unit_name state pid enabled
         declare -A seen=()
@@ -318,10 +289,8 @@ main() {
         done
       fi
       ;;
-    --version)
-      echo "systemd 255 (Ubuntu 24.04)"; exit 0 ;;
-    *)
-      exit 0 ;;
+    --version) echo "systemd 255 (Ubuntu 24.04)"; exit 0 ;;
+    *) exit 0 ;;
   esac
 }
 main "$@"
@@ -367,6 +336,7 @@ main() {
 main "$@"
 HCTL_EOF
 
+# API
 RUN cat > /ivt/os/api.py << 'API_EOF'
 #!/usr/bin/env python3
 import html, os, subprocess
@@ -396,6 +366,7 @@ if __name__ == "__main__":
     HTTPServer(("0.0.0.0", PORT), H).serve_forever()
 API_EOF
 
+# IVT-LINK Master
 RUN cat > /ivt/os/ivt-link-master.py << 'LINK_EOF'
 #!/usr/bin/env python3
 import os, json, time, queue
@@ -431,6 +402,7 @@ if __name__ == "__main__":
     HTTPServer(("0.0.0.0", LINK_PORT), L).serve_forever()
 LINK_EOF
 
+# Service units
 RUN cat > /etc/ivt/units/ivt-api.service << 'EOF'
 [Unit]
 Description=IVT Master API & Dashboard
@@ -464,6 +436,7 @@ RestartSec=1
 Target=default
 EOF
 
+# Permissions
 RUN chmod +x /ivt/os/init /usr/local/bin/systemctl /usr/local/bin/service /usr/local/bin/journalctl /usr/local/bin/hostnamectl && \
     echo 'ivt-master' > /etc/hostname && \
     echo "default" > /etc/ivt/default.target && \
@@ -480,8 +453,5 @@ RUN chmod +x /ivt/os/init /usr/local/bin/systemctl /usr/local/bin/service /usr/l
     chmod 0440 /etc/sudoers.d/root
 
 EXPOSE 8080 8081
-
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD curl -sf http://127.0.0.1:8080/health || exit 1
-
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl -sf http://127.0.0.1:8080/health || exit 1
 CMD ["/ivt/os/init"]
