@@ -25,7 +25,7 @@ RUN mkdir -p \
       /run/ivt/ctrl /run/ivt/pids /run/ivt/state /run/ivt/manual /run/ivt/link \
       /var/log/ivt/journal /etc/systemd/system /lib/systemd/system /run/systemd
 
-# Create IVT-D init system (PID 1) - NOW SUPPORTS WorkingDirectory
+# Create IVT-D init system (PID 1)
 RUN cat > /ivt/os/init << 'INITEOF'
 #!/bin/bash
 set -u
@@ -78,7 +78,6 @@ service_start() {
   
   echo starting > $RUN/state/$name
   
-  # Execute with WorkingDirectory support
   (
     if [[ -n $workdir ]]; then
       cd "$workdir" || exit 1
@@ -202,7 +201,7 @@ EOF
 esac
 CTL_EOF
 
-# Create UNIVERSAL systemctl compatibility (Bridges /etc/systemd/system/ to IVT-D)
+# Create UNIVERSAL systemctl compatibility (NOW INCLUDES is-active for x-ui menu)
 RUN cat > /usr/local/bin/systemctl << 'SYSCTL_EOF'
 #!/bin/bash
 set -u
@@ -212,7 +211,6 @@ TARGETS=/etc/ivt/targets
 LOG=/var/log/ivt/journal
 IVTCTL=/usr/local/bin/ivtctl
 
-# Automatically sync any unit file placed in /etc/systemd/system/ by standard installers
 ensure_unit() {
   local unit="${1%.service}.service"
   local sys_unit="/etc/systemd/system/$unit"
@@ -244,6 +242,30 @@ case $cmd in
     unit="${1%.service}"
     rm -f "$TARGETS/default.wants/$unit.service"
     echo "Removed symlink"
+    ;;
+  is-active)
+    unit="${1%.service}"
+    ensure_unit "$unit"
+    state=$(cat $RUN/state/$unit 2>/dev/null || echo inactive)
+    if [[ "$state" == "running" ]]; then
+      pid=$(cat $RUN/pids/$unit.pid 2>/dev/null || echo "")
+      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        echo "active"
+        exit 0
+      fi
+    fi
+    echo "inactive"
+    exit 3
+    ;;
+  is-enabled)
+    unit="${1%.service}"
+    if [[ -e "$TARGETS/default.wants/$unit.service" ]]; then
+      echo "enabled"
+      exit 0
+    else
+      echo "disabled"
+      exit 1
+    fi
     ;;
   start|stop|restart)
     unit="${1%.service}"
