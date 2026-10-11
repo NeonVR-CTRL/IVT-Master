@@ -371,20 +371,44 @@ main() {
     is-active)
       local unit="${1%.service}"
       ensure_unit "$unit"
-      if pgrep -f "$unit" > /dev/null 2>&1; then
+      
+      # BULLETPROOF: Universal ps fallback
+      if ps -ef | grep -v grep | grep -q "$unit"; then
         echo "active"
         exit 0
       fi
+      
+      local state=$(cat "$RUN_DIR/state/$unit" 2>/dev/null || echo "inactive")
+      if [[ "$state" == "running" ]]; then
+        local pid=$(cat "$RUN_DIR/pids/$unit.pid" 2>/dev/null || echo "")
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+          echo "active"
+          exit 0
+        fi
+      fi
+      
       echo "inactive"
       exit 3
       ;;
     show)
       local unit="${1%.service}"
       ensure_unit "$unit"
-      if pgrep -f "$unit" > /dev/null 2>&1; then
+      
+      # BULLETPROOF: Universal ps fallback (matches exactly what x-ui.sh expects)
+      if ps -ef | grep -v grep | grep -q "$unit"; then
         echo "SubState=running"
         exit 0
       fi
+      
+      local state=$(cat "$RUN_DIR/state/$unit" 2>/dev/null || echo "inactive")
+      if [[ "$state" == "running" ]]; then
+        local pid=$(cat "$RUN_DIR/pids/$unit.pid" 2>/dev/null || echo "")
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+          echo "SubState=running"
+          exit 0
+        fi
+      fi
+      
       echo "SubState=dead"
       exit 0
       ;;
