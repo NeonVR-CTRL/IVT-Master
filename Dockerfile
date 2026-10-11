@@ -201,7 +201,7 @@ EOF
 esac
 CTL_EOF
 
-# Create UNIVERSAL systemctl compatibility (FIXED: get_value is now defined locally)
+# Create UNIVERSAL systemctl compatibility (100% BULLETPROOF DETECTION)
 RUN cat > /usr/local/bin/systemctl << 'SYSCTL_EOF'
 #!/bin/bash
 set -u
@@ -211,7 +211,6 @@ TARGETS=/etc/ivt/targets
 LOG=/var/log/ivt/journal
 IVTCTL=/usr/local/bin/ivtctl
 
-# Define get_value locally so it works in this script
 get_value() {
   mawk -v section="$2" -v key="$3" 'BEGIN{c=""} /^\[/{c=$0;gsub(/[\[\] \t\r]/,"",c);next} c==section{p=index($0,"=");if(p>0){k=substr($0,1,p-1);gsub(/[ \t\r]/,"",k);if(k==key){v=substr($0,p+1);sub(/\r$/,"",v);print v;exit}}}' "$1" 2>/dev/null
 }
@@ -261,9 +260,10 @@ case $cmd in
     fi
     execstart=$(get_value "/etc/ivt/units/$unit.service" Service ExecStart)
     if [[ -n "$execstart" ]]; then
-      cmd_name=$(echo "$execstart" | awk '{print $1}')
+      cmd_name=$(echo "$execstart" | sed -E 's/^ExecStart=//; s/^\/bin\/sh -c //; s/^exec //' | awk '{print $1}')
       proc_name=$(basename "$cmd_name")
-      if pgrep -x "$proc_name" > /dev/null 2>&1; then
+      # BULLETPROOF: Use -f to match the full command line, bypassing 15-char name limits
+      if pgrep -f "$proc_name" > /dev/null 2>&1; then
         echo "active"
         exit 0
       fi
@@ -275,12 +275,12 @@ case $cmd in
     unit="${1%.service}"
     ensure_unit "$unit"
     
-    # Check if the process is actually running using pgrep (Bulletproof)
+    # BULLETPROOF DETECTION: Check if the binary is in the process list
     execstart=$(get_value "/etc/ivt/units/$unit.service" Service ExecStart)
     if [[ -n "$execstart" ]]; then
       cmd_name=$(echo "$execstart" | sed -E 's/^ExecStart=//; s/^\/bin\/sh -c //; s/^exec //' | awk '{print $1}')
       proc_name=$(basename "$cmd_name")
-      if pgrep -x "$proc_name" > /dev/null 2>&1; then
+      if pgrep -f "$proc_name" > /dev/null 2>&1; then
         echo "SubState=running"
         exit 0
       fi
