@@ -19,7 +19,7 @@ RUN mkdir -p \
       /run/ivt/ctrl /run/ivt/pids /run/ivt/state /run/ivt/manual /run/ivt/link \
       /var/log/ivt/journal /etc/systemd /lib/systemd /run/systemd
 
-# Create IVT-D init system (PID 1)
+# Create IVT-D init system (PID 1) - FIXED
 RUN cat > /ivt/os/init << 'INITEOF'
 #!/bin/bash
 set -u
@@ -45,28 +45,47 @@ get_value() {
 }
 
 kill_tree() {
-  local pid=$1 sig=${2:-TERM} children=$(pgrep -P $pid 2>/dev/null || true)
+  local pid=$1
+  local sig=${2:-TERM}
+  local children=$(pgrep -P $pid 2>/dev/null || true)
   for child in $children; do kill_tree $child $sig; done
   kill -$sig $pid 2>/dev/null || true
 }
 
 service_start() {
-  local unitfile=$1 name=$(basename $1 .service) pidfile="$RUN/pids/$name.pid"
+  local unitfile=$1
+  local name=$(basename $1 .service)
+  local pidfile="$RUN/pids/$name.pid"
+  
   [[ -f $pidfile ]] && kill -0 $(cat $pidfile 2>/dev/null) 2>/dev/null && { echo running > $RUN/state/$name; return 0; }
   rm -f "$RUN/manual/$name"
-  local execstart=$(get_value $unitfile Service ExecStart) restart=$(get_value $unitfile Service Restart) restartsec=$(get_value $unitfile Service RestartSec)
-  restart=${restart:-no}; restartsec=${restartsec:-1}
+  
+  local execstart=$(get_value $unitfile Service ExecStart)
+  local restart=$(get_value $unitfile Service Restart)
+  local restartsec=$(get_value $unitfile Service RestartSec)
+  
+  restart=${restart:-no}
+  restartsec=${restartsec:-1}
+  
   [[ -z $execstart ]] && { echo failed > $RUN/state/$name; return 1; }
+  
   echo starting > $RUN/state/$name
   /bin/sh -c "$execstart" >> $LOG/$name.log 2>&1 &
-  local pid=$!; echo $pid > $pidfile; echo running > $RUN/state/$name
-  PIDS[$pid]=$name; RESTART[$name]="$restart:$restartsec"
+  local pid=$!
+  
+  echo $pid > $pidfile
+  echo running > $RUN/state/$name
+  PIDS[$pid]=$name
+  RESTART[$name]="$restart:$restartsec"
   log_system "started $name pid=$pid"
 }
 
 service_stop() {
-  local name=$1 pidfile="$RUN/pids/$name.pid"
+  local name=$1
+  local pidfile="$RUN/pids/$name.pid"
+  
   touch "$RUN/manual/$name"
+  
   if [[ -f $pidfile ]]; then
     local pid=$(cat $pidfile 2>/dev/null || true)
     if [[ -n $pid ]]; then
@@ -77,7 +96,8 @@ service_stop() {
     fi
     rm -f $pidfile
   fi
-  echo stopped > $RUN/state/$name; log_system "stopped $name"
+  echo stopped > $RUN/state/$name
+  log_system "stopped $name"
 }
 
 shutdown_system() {
@@ -107,13 +127,20 @@ while true; do
   fi
   for pid in "${!PIDS[@]}"; do
     if ! kill -0 $pid 2>/dev/null; then
-      name=${PIDS[$pid]}; unset "PIDS[$pid]" 2>/dev/null || true; rm -f "$RUN/pids/$name.pid"
+      name=${PIDS[$pid]}
+      unset "PIDS[$pid]" 2>/dev/null || true
+      rm -f "$RUN/pids/$name.pid"
       if [[ -f $RUN/manual/$name ]]; then echo stopped > $RUN/state/$name; continue; fi
-      policy=${RESTART[$name]:-no:1}; restart_policy=${policy%%:*}; restart_sec=${policy##*:}
+      policy=${RESTART[$name]:-no:1}
+      restart_policy=${policy%%:*}
+      restart_sec=${policy##*:}
       if [[ $restart_policy == "always" || $restart_policy == "on-failure" ]]; then
-        log_system "restarting $name in ${restart_sec}s"; sleep $restart_sec 2>/dev/null || true
+        log_system "restarting $name in ${restart_sec}s"
+        sleep $restart_sec 2>/dev/null || true
         service_start "$UNITS/$name.service"
-      else echo exited > $RUN/state/$name; fi
+      else
+        echo exited > $RUN/state/$name
+      fi
     fi
   done
   sleep 0.5
