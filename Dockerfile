@@ -28,7 +28,7 @@ RUN mkdir -p \
       /etc/systemd/system /lib/systemd/system /run/systemd
 
 # ==============================================================================
-# 5. ADVANCED INIT SYSTEM (PID 1): Fully supports Environment & EnvironmentFile
+# 5. ADVANCED INIT SYSTEM (PID 1): Bulletproof Environment & Process Handling
 # ==============================================================================
 RUN cat > /ivt/os/init << 'INITEOF'
 #!/bin/bash
@@ -114,21 +114,24 @@ service_start() {
   echo "starting" > "$RUN_DIR/state/$name"
   
   (
+    # Disable strict exit-on-error for setup phase to prevent silent crashes
+    set +e
+    
     if [[ -n "$workdir" ]]; then
       cd "$workdir" || exit 1
     fi
     
-    # UNIVERSAL COMPATIBILITY: Handle EnvironmentFile (strip leading '-' if present)
+    # BULLETPROOF: Handle EnvironmentFile (strip leading '-' if present)
     if [[ -n "$env_file" ]]; then
       local clean_env="${env_file#-}"
       if [[ -f "$clean_env" ]]; then
         set -a
-        source "$clean_env"
+        . "$clean_env" || true
         set +a
       fi
     fi
     
-    # UNIVERSAL COMPATIBILITY: Handle inline Environment variables
+    # BULLETPROOF: Handle inline Environment variables
     if [[ -n "$env_vars" ]]; then
       env_vars="${env_vars%\"}"
       env_vars="${env_vars#\"}"
@@ -137,6 +140,8 @@ service_start() {
       export $env_vars
     fi
     
+    # Re-enable strict mode for the actual execution
+    set -e
     exec /bin/sh -c "$execstart" >> "$LOG/$name.log" 2>&1
   ) &
   
@@ -250,7 +255,7 @@ main "$@"
 INITEOF
 
 # ==============================================================================
-# 6. 100% UBUNTU COMMAND NAMES: systemctl, service, journalctl (No custom helpers)
+# 6. 100% UBUNTU COMMAND NAMES: systemctl, service, journalctl
 # ==============================================================================
 RUN cat > /usr/local/bin/systemctl << 'SYSCTL_EOF'
 #!/bin/bash
@@ -325,7 +330,8 @@ main() {
     is-active)
       local unit="${1%.service}"
       ensure_unit "$unit"
-      if ps -ef | grep -v grep | grep -q "$unit"; then
+      # BULLETPROOF: pgrep -f matches the full command line
+      if pgrep -f "$unit" > /dev/null 2>&1; then
         echo "active"; exit 0
       fi
       local state=$(cat "$RUN_DIR/state/$unit" 2>/dev/null || echo "inactive")
@@ -349,7 +355,8 @@ main() {
     show)
       local unit="${1%.service}"
       ensure_unit "$unit"
-      if ps -ef | grep -v grep | grep -q "$unit"; then
+      # BULLETPROOF: pgrep -f matches the full command line
+      if pgrep -f "$unit" > /dev/null 2>&1; then
         echo "SubState=running"; exit 0
       fi
       local state=$(cat "$RUN_DIR/state/$unit" 2>/dev/null || echo "inactive")
@@ -434,7 +441,7 @@ while [[ $# -gt 0 ]]; do
     -u|--unit) shift; unit="${1:-}";; --unit=*) unit="${1#--unit=}";;
     -n|--lines) shift; lines="${1:-50}";; --lines=*) lines="${1#--lines=}";;
     -f|--follow) follow=true;;
-    *) shift;; # Gracefully ignore other flags
+    *) shift;;
   esac
 done
 unit="${unit%.service}"
