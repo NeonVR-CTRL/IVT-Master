@@ -10,10 +10,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d && \
     touch /.dockerenv
 
-# Minimal dependencies
+# Minimal dependencies (FIXED: Changed python3-minimal to python3)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      bash coreutils procps util-linux mawk ca-certificates curl sudo python3-minimal systemd-sysv && \
+      bash coreutils procps util-linux mawk ca-certificates curl sudo python3 systemd-sysv && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* /var/cache/apt/*
 
