@@ -454,4 +454,12 @@ RUN chmod +x /ivt/os/init /usr/local/bin/systemctl /usr/local/bin/service /usr/l
 
 EXPOSE 8080 8081
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl -sf http://127.0.0.1:8080/health || exit 1
-CMD ["/ivt/os/init"]
+
+# --- THE FIX: ENTRYPOINT WRAPPER ---
+RUN printf '%s\n' \
+  '#!/bin/sh' \
+  'echo "[ivt] container starting..."' \
+  'exec /ivt/os/init "$@"' \
+  > /entrypoint.sh && chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
