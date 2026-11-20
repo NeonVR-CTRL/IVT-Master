@@ -4,16 +4,24 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PORT=8080 \
     LINK_PORT=8081 \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    IVT_ROLE=master
+    IVT_ROLE=master \
+    TERM=xterm-256color \
+    LANG=C.UTF-8
 
 # Docker marker + policy-rc.d
 RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d && \
     touch /.dockerenv
 
-# Minimal dependencies (FIXED: Changed python3-minimal to python3)
+# Install a FULL OS environment + explicit passwd tool
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      bash coreutils procps util-linux mawk ca-certificates curl sudo python3 systemd-sysv && \
+      bash coreutils procps util-linux mawk ca-certificates curl wget sudo \
+      python3 systemd-sysv openssh-server passwd \
+      vim nano htop tmux screen git unzip zip tar less tree \
+      net-tools iproute2 dnsutils iputils-ping traceroute curl \
+      cron rsyslog logrotate \
+      locales tzdata && \
+    locale-gen C.UTF-8 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* /var/cache/apt/*
 
@@ -24,22 +32,22 @@ RUN printf 'PRETTY_NAME="Ubuntu 24.04.1 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\
 RUN mkdir -p \
       /ivt/os \
       /etc/ivt/units /etc/ivt/targets/default.wants /etc/ivt/targets/multi-user.target.wants \
-      /run/ivt/ctrl /run/ivt/pids /run/ivt/state /run/ivt/manual /run/ivt/link \
-      /var/log/ivt/journal \
-      /etc/systemd/system /lib/systemd/system /run/systemd
+      /home/container/.ivt/run/ctrl /home/container/.ivt/run/pids /home/container/.ivt/run/state /home/container/.ivt/run/manual /home/container/.ivt/run/link \
+      /home/container/.ivt/log \
+      /etc/systemd/system /lib/systemd/system /run/systemd /var/run/sshd
 
-# INIT SYSTEM
+# INIT SYSTEM (The Fake-Systemd)
 RUN cat > /ivt/os/init << 'INITEOF'
 #!/bin/bash
 set -euo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-RUN_DIR=/run/ivt
+RUN_DIR=/home/container/.ivt/run
 UNITS=/etc/ivt/units
 TARGETS=/etc/ivt/targets
-LOG=/var/log/ivt/journal
+LOG=/home/container/.ivt/log
 TARGET_FILE=/etc/ivt/default.target
 mkdir -p "$RUN_DIR"/{ctrl,pids,state,manual,link} "$LOG"
-[[ ! -f /etc/machine-id ]] && cat /proc/sys/kernel/random/uuid > /etc/machine-id
+cat /proc/sys/kernel/random/uuid > "$RUN_DIR/machine-id" || true
 cat /proc/sys/kernel/random/uuid > "$RUN_DIR/boot-id"
 date +%s > "$RUN_DIR/boottime"
 declare -A PIDS=()
@@ -168,14 +176,14 @@ main() {
 main "$@"
 INITEOF
 
-# systemctl - FIXED STATUS FORMAT
+# Fake systemctl
 RUN cat > /usr/local/bin/systemctl << 'SYSCTL_EOF'
 #!/bin/bash
 set -euo pipefail
-RUN_DIR=/run/ivt
+RUN_DIR=/home/container/.ivt/run
 UNITS=/etc/ivt/units
 TARGETS=/etc/ivt/targets
-LOG=/var/log/ivt/journal
+LOG=/home/container/.ivt/log
 
 is_running() {
   local name="$1"
@@ -306,7 +314,7 @@ SVC_EOF
 RUN cat > /usr/local/bin/journalctl << 'JCTL_EOF'
 #!/bin/bash
 set -euo pipefail
-LOG=/var/log/ivt/journal
+LOG=/home/container/.ivt/log
 unit=""; lines=50; follow=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -325,12 +333,13 @@ JCTL_EOF
 RUN cat > /usr/local/bin/hostnamectl << 'HCTL_EOF'
 #!/bin/bash
 set -euo pipefail
+RUN_DIR=/home/container/.ivt/run
 main() {
   local cmd="${1:-status}"
   case "$cmd" in
-    status) echo " Static hostname: $(cat /etc/hostname 2>/dev/null || echo ivt-master)"; echo "  Operating System: $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-Ubuntu}")"; echo "          Kernel: $(uname -r)";;
-    set-hostname) echo "${2:-ivt-master}" > /etc/hostname 2>/dev/null || true;;
-    hostname) cat /etc/hostname 2>/dev/null || echo ivt-master;;
+    status) echo " Static hostname: $(cat "$RUN_DIR/hostname" 2>/dev/null || cat /etc/hostname 2>/dev/null || echo ivt-master)"; echo "  Operating System: $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-Ubuntu}")"; echo "          Kernel: $(uname -r)";;
+    set-hostname) echo "${2:-ivt-master}" > "$RUN_DIR/hostname" 2>/dev/null || true;;
+    hostname) cat "$RUN_DIR/hostname" 2>/dev/null || cat /etc/hostname 2>/dev/null || echo ivt-master;;
   esac
 }
 main "$@"
@@ -429,20 +438,53 @@ RUN cat > /etc/ivt/units/ivt-heartbeat.service << 'EOF'
 [Unit]
 Description=IVT Master Heartbeat
 [Service]
-ExecStart=/bin/sh -c 'while true; do date +%s > /run/ivt/heartbeat; sleep 5; done'
+ExecStart=/bin/sh -c 'while true; do date +%s > /home/container/.ivt/run/heartbeat; sleep 5; done'
 Restart=always
 RestartSec=1
 [Install]
 Target=default
 EOF
 
-# Permissions
+# SSH Service
+RUN cat > /etc/ivt/units/ivt-sshd.service << 'EOF'
+[Unit]
+Description=OpenSSH Server
+[Service]
+ExecStart=/usr/sbin/sshd -D
+Restart=always
+RestartSec=2
+[Install]
+Target=default
+EOF
+
+# --- FULL OS SETUP ---
+
+# 1. Configure SSH
+RUN mkdir -p /etc/ssh/sshd_config.d && \
+    echo "PermitRootLogin yes" > /etc/ssh/sshd_config.d/00-allow-root.conf && \
+    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config.d/00-allow-root.conf && \
+    echo "Port 22" >> /etc/ssh/sshd_config.d/00-allow-root.conf && \
+    sed -i 's/^#\?Port .*/Port 22/' /etc/ssh/sshd_config && \
+    sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+# 2. Set root password to "root" (You can change this via `passwd` later)
+RUN echo 'root:root' | chpasswd
+
+# 3. Make the OS boot into /home/container and add a nice bash prompt
+RUN echo 'cd /home/container' >> /root/.bashrc && \
+    echo 'export PS1="\[\e[1;32m\]\u@ivt-os\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ "' >> /root/.bashrc && \
+    echo 'alias ls="ls --color=auto"' >> /root/.bashrc && \
+    echo 'alias ll="ls -alF"' >> /root/.bashrc
+
+# Permissions & Symlinks
 RUN chmod +x /ivt/os/init /usr/local/bin/systemctl /usr/local/bin/service /usr/local/bin/journalctl /usr/local/bin/hostnamectl && \
     echo 'ivt-master' > /etc/hostname && \
     echo "default" > /etc/ivt/default.target && \
     ln -sf /etc/ivt/units/ivt-api.service /etc/ivt/targets/default.wants/ && \
     ln -sf /etc/ivt/units/ivt-link-master.service /etc/ivt/targets/default.wants/ && \
     ln -sf /etc/ivt/units/ivt-heartbeat.service /etc/ivt/targets/default.wants/ && \
+    ln -sf /etc/ivt/units/ivt-sshd.service /etc/ivt/targets/default.wants/ && \
     ln -sf /usr/local/bin/systemctl /usr/bin/systemctl && \
     ln -sf /usr/local/bin/journalctl /usr/bin/journalctl && \
     ln -sf /usr/local/bin/service /usr/sbin/service && \
@@ -452,10 +494,14 @@ RUN chmod +x /ivt/os/init /usr/local/bin/systemctl /usr/local/bin/service /usr/l
     echo 'root ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/root && \
     chmod 0440 /etc/sudoers.d/root
 
-EXPOSE 8080 8081
+# Set working directory so terminal starts in the right place
+WORKDIR /home/container
+
+EXPOSE 22 8080 8081
+
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl -sf http://127.0.0.1:8080/health || exit 1
 
-# --- THE FIX: ENTRYPOINT WRAPPER ---
+# --- ENTRYPOINT WRAPPER ---
 RUN printf '%s\n' \
   '#!/bin/sh' \
   'echo "[ivt] container starting..."' \
