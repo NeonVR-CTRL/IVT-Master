@@ -1,4 +1,3 @@
-
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -24,6 +23,17 @@ RUN apt-get update && \
     /opt/ivt-venv/bin/pip install --no-cache-dir aiohttp asyncssh && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* /var/cache/apt/*
+
+# ==========================================
+# OFFICIAL OOKLA SPEEDTEST CLI
+# ==========================================
+
+RUN cd /tmp && \
+    curl -fLO https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.tgz && \
+    tar -xzf ookla-speedtest-1.2.0-linux-x86_64.tgz && \
+    install -m 0755 speedtest /usr/local/bin/speedtest && \
+    speedtest --version && \
+    rm -f /tmp/ookla-speedtest-1.2.0-linux-x86_64.tgz /tmp/speedtest /tmp/speedtest.md /tmp/speedtest.5
 
 RUN printf 'PRETTY_NAME="Ubuntu 24.04.1 LTS"\nNAME="Ubuntu"\nVERSION_ID="24.04"\nVERSION="24.04.1 LTS (Noble Numbat)"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL="https://www.ubuntu.com/"\nSUPPORT_URL="https://help.ubuntu.com/"\nBUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n' > /etc/os-release
 
@@ -877,9 +887,6 @@ body.fullscreen-terminal .terminal-instance{height:calc(100vh - 170px)}
 </div>
 <div class="toast" id="toast"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-search@0.15.0/lib/addon-search.js"></script>
 <script>
 const $=id=>document.getElementById(id);
 const pageNames={
@@ -1441,7 +1448,7 @@ app.router.add_get("/terminal", terminal)
 app.cleanup_ctx.append(cleanup_sessions)
 
 if __name__ == "__main__":
-    web.run_app(app, host="0.0.0.0", port=PORT, shutdown_timeout=5)
+    web.run_app(app, host="0.0.0.0", port=PORT)
 API_EOF
 
 # ==========================================
